@@ -95,19 +95,26 @@ Each implementation is self-consistent, so a roll offset measured in the browser
 applies to the browser; carrying an offset between the two leaves a degree or
 two on the table. Matching the trackers exactly is open work.
 
-## Browser output caveat
+## Browser output
 
-`MediaRecorder` timestamps frames as they arrive, so if rendering runs slower
-than real time the file's *duration* is wrong even though every frame is present
-and in order. The page detects this and prints the command that fixes it:
+Encoded with WebCodecs `VideoEncoder` (VP9, falling back to VP8) and muxed into
+WebM here, rather than through `MediaRecorder`. That matters for timing:
+`MediaRecorder` timestamps frames as they arrive from the canvas, which is
+wall-clock time, so a render slower than real time produces a file whose
+duration is wrong. The W3C issue tracker has this as intended behaviour, and no
+flag changes it.
 
-```bash
-ffmpeg -i out.webm -fps_mode cfr -r 30 out.mp4
-```
+Setting each frame's timestamp to `frameIndex * 1e6 / fps` microseconds instead
+makes the output's timing the source's timing, however slowly it renders. A
+verification run bears this out: 90 frames rendered at 13 fps wall clock came
+back as 90 frames, `avg_frame_rate=30/1`, duration exactly 3.000000s.
 
-Fixing it properly means WebCodecs plus a muxer, which costs a demuxer, a
-keyframe-aware redesign of the second pass, and resolution limits that this
-canvas can exceed.
+VP9 is preferred over H.264 because the expanded canvas routinely exceeds the
+macroblock limits that H.264 levels advertise.
+
+Browsers without `VideoEncoder` fall back to `MediaRecorder`. Every frame is
+still present and in order, but the duration follows render speed, and the page
+says so and prints the `ffmpeg` command that fixes it.
 
 ## Development
 

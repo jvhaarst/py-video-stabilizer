@@ -797,7 +797,183 @@ function boundsOf(mats, upto) {
   return { x0, x1, y0, y1 };
 }
 
-async function renderOutput(lock, sigma, offsetDeg, cap) {
+// --------------------------------------------------------- webm muxing ----
+// MediaRecorder timestamps frames as they arrive from the canvas, which is
+// wall-clock time, so a render slower than real time produces a file whose
+// duration is wrong. WebCodecs lets us stamp each frame ourselves. It has no
+// container though, so this writes the minimal EBML needed for one video
+// track: header, Info, Tracks, then Clusters of SimpleBlocks.
+const EL = {
+  EBML: [0x1A,0x45,0xDF,0xA3], DocType: [0x42,0x82], DocTypeVersion: [0x42,0x87],
+  DocTypeReadVersion: [0x42,0x85], EBMLVersion: [0x42,0x86], EBMLReadVersion: [0x42,0xF7],
+  EBMLMaxIDLength: [0x42,0xF2], EBMLMaxSizeLength: [0x42,0xF3],
+  Segment: [0x18,0x53,0x80,0x67], Info: [0x15,0x49,0xA9,0x66],
+  TimecodeScale: [0x2A,0xD7,0xB1], MuxingApp: [0x4D,0x80], WritingApp: [0x57,0x41],
+  Duration: [0x44,0x89], Tracks: [0x16,0x54,0xAE,0x6B], TrackEntry: [0xAE],
+  TrackNumber: [0xD7], TrackUID: [0x73,0xC5], TrackType: [0x83], CodecID: [0x86],
+  DefaultDuration: [0x23,0xE3,0x83], Video: [0xE0], PixelWidth: [0xB0], PixelHeight: [0xBA],
+  Cluster: [0x1F,0x43,0xB6,0x75], Timecode: [0xE7], SimpleBlock: [0xA3],
+};
+function vint(n) {                       // EBML size, shortest form that fits
+  for (let len = 1; len <= 8; len++) {
+    const max = 2 ** (7*len) - 1;
+    if (n < max) {
+      const b = new Uint8Array(len);
+      let v = n;
+      for (let i = len-1; i >= 0; i--) { b[i] = v & 0xff; v = Math.floor(v / 256); }
+      b[0] |= 1 << (8-len);
+      return b;
+    }
+  }
+  throw new Error("value too large for EBML");
+}
+function uintBytes(n) {
+  const b = [];
+  do { b.unshift(n & 0xff); n = Math.floor(n / 256); } while (n > 0);
+  return new Uint8Array(b);
+}
+function el(id, payload) {
+  const size = vint(payload.length);
+  const out = new Uint8Array(id.length + size.length + payload.length);
+  out.set(id, 0); out.set(size, id.length); out.set(payload, id.length + size.length);
+  return out;
+}
+const cat = parts => {
+  const total = parts.reduce((a, p) => a + p.length, 0);
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+};
+const elUint = (id, n) => el(id, uintBytes(n));
+const elStr = (id, s) => el(id, new TextEncoder().encode(s));
+function elFloat(id, v) {
+  const b = new Uint8Array(8);
+  new DataView(b.buffer).setFloat64(0, v, false);
+  return el(id, b);
+}
+function buildWebM(frames, width, height, fps, codecId) {
+  const SCALE_MS = 1;                    // TimecodeScale 1e6 ns, so units are ms
+  const header = el(EL.EBML, cat([
+    elUint(EL.EBMLVersion, 1), elUint(EL.EBMLReadVersion, 1),
+    elUint(EL.EBMLMaxIDLength, 4), elUint(EL.EBMLMaxSizeLength, 8),
+    elStr(EL.DocType, "webm"), elUint(EL.DocTypeVersion, 2), elUint(EL.DocTypeReadVersion, 2),
+  ]));
+  const durationMs = frames.length * 1000 / fps;
+  const info = el(EL.Info, cat([
+    elUint(EL.TimecodeScale, 1000000),
+    elStr(EL.MuxingApp, "py-video-stabilizer"), elStr(EL.WritingApp, "py-video-stabilizer"),
+    elFloat(EL.Duration, durationMs / SCALE_MS),
+  ]));
+  const tracks = el(EL.Tracks, el(EL.TrackEntry, cat([
+    elUint(EL.TrackNumber, 1), elUint(EL.TrackUID, 1), elUint(EL.TrackType, 1),
+    elStr(EL.CodecID, codecId), elUint(EL.DefaultDuration, Math.round(1e9 / fps)),
+    el(EL.Video, cat([elUint(EL.PixelWidth, width), elUint(EL.PixelHeight, height)])),
+  ])));
+
+  // A SimpleBlock's timecode is a signed 16-bit offset from its cluster, so
+  // start a new cluster on every keyframe and before that range runs out.
+  const clusters = [];
+  let blocks = [], clusterStart = 0;
+  const flushCluster = () => {
+    if (!blocks.length) return;
+    clusters.push(el(EL.Cluster, cat([elUint(EL.Timecode, clusterStart), ...blocks])));
+    blocks = [];
+  };
+  for (const f of frames) {
+    const ms = Math.round(f.timestampUs / 1000);
+    if (!blocks.length || (f.key && ms - clusterStart > 0) || ms - clusterStart > 30000) {
+      flushCluster();
+      clusterStart = ms;
+    }
+    const rel = ms - clusterStart;
+    const body = new Uint8Array(4 + f.data.length);
+    body[0] = 0x81;                                  // track 1 as a 1-byte vint
+    new DataView(body.buffer).setInt16(1, rel, false);
+    body[3] = f.key ? 0x80 : 0x00;                   // keyframe flag
+    body.set(f.data, 4);
+    blocks.push(el(EL.SimpleBlock, body));
+  }
+  flushCluster();
+
+  return new Blob([header, el(EL.Segment, cat([info, tracks, ...clusters]))],
+                  { type: "video/webm" });
+}
+
+async function pickVideoCodec(width, height, fps) {
+  if (typeof VideoEncoder === "undefined") return null;
+  const bitrate = Math.min(40e6, Math.max(6e6, Math.round(width*height*fps*0.08)));
+  for (const [codec, codecId] of [["vp09.00.10.08", "V_VP9"], ["vp8", "V_VP8"]]) {
+    const config = { codec, width, height, bitrate, framerate: fps };
+    try {
+      const s = await VideoEncoder.isConfigSupported(config);
+      if (s && s.supported) return { config, codecId };
+    } catch (e) { /* try the next codec */ }
+  }
+  return null;
+}
+
+// Stamp every frame ourselves, so the file's timing is the source's timing and
+// not however fast this machine happened to render.
+function webCodecsSink(canvas, picked, fps) {
+  const frames = [];
+  let failure = null;
+  const enc = new VideoEncoder({
+    output: chunk => {
+      const data = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(data);
+      frames.push({ data, timestampUs: chunk.timestamp, key: chunk.type === "key" });
+    },
+    error: e => { failure = e; },
+  });
+  enc.configure(picked.config);
+  const gop = Math.max(1, Math.round(fps * 2));
+  return {
+    label: picked.config.codec,
+    exact: true,
+    async push(i) {
+      if (failure) throw failure;
+      const frame = new VideoFrame(canvas, {
+        timestamp: Math.round(i * 1e6 / fps), duration: Math.round(1e6 / fps),
+      });
+      enc.encode(frame, { keyFrame: i % gop === 0 });
+      frame.close();
+      while (enc.encodeQueueSize > 8 && !failure)   // let the encoder keep up
+        await new Promise(r => setTimeout(r, 4));
+    },
+    async finish() {
+      await enc.flush();
+      enc.close();
+      if (failure) throw failure;
+      frames.sort((a, b) => a.timestampUs - b.timestampUs);
+      return buildWebM(frames, canvas.width, canvas.height, fps, picked.codecId);
+    },
+  };
+}
+// Fallback for browsers without WebCodecs: correct frames, wall-clock timing.
+function mediaRecorderSink(canvas) {
+  const stream = canvas.captureStream(0);
+  const track = stream.getVideoTracks()[0];
+  const mime = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"]
+    .find(t => MediaRecorder.isTypeSupported(t)) || "";
+  const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 12e6 });
+  const chunks = [];
+  rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  const stopped = new Promise(r => { rec.onstop = r; });
+  rec.start();
+  return {
+    label: "MediaRecorder",
+    exact: false,
+    async push() { track.requestFrame(); },
+    async finish() {
+      rec.stop();
+      await stopped;
+      return new Blob(chunks, { type: mime.split(";")[0] || "video/webm" });
+    },
+  };
+}
+
+async function renderOutput(lock, sigma, offsetDeg, cap, limit) {
   const cx = srcW/2, cy = srcH/2;
   const poses = buildPoses(lock, sigma, offsetDeg);
   let mats = posesToMatrices(poses);
@@ -825,35 +1001,28 @@ async function renderOutput(lock, sigma, offsetDeg, cap) {
   const out = document.createElement("canvas");
   out.width = outW; out.height = outH;
   const octx = out.getContext("2d");
-  const stream = out.captureStream(0);
-  const track = stream.getVideoTracks()[0];
-  const types = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
-  const mime = types.find(t => MediaRecorder.isTypeSupported(t)) || "";
-  const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 12e6 });
-  const chunks = [];
-  rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
-  const stopped = new Promise(r => { rec.onstop = r; });
-  rec.start();
+
+  const picked = await pickVideoCodec(outW, outH, FPS);
+  const sink = picked ? webCodecsSink(out, picked, FPS) : mediaRecorderSink(out);
+  const total = limit ? Math.min(limit, steps.length) : steps.length;
 
   const t0 = performance.now();
-  for (let i = 0; i < steps.length; i++) {
+  for (let i = 0; i < total; i++) {
     await seekTo((i + 0.5)/FPS);
     const m = mul(place, mats[i]);
     octx.setTransform(1,0,0,1,0,0);
     octx.fillStyle = "#000"; octx.fillRect(0,0,outW,outH);
     octx.setTransform(m[0], m[3], m[1], m[4], m[2], m[5]);   // a,b,c,d,e,f
     octx.drawImage(video, 0, 0);
-    track.requestFrame();
+    await sink.push(i);
     if (i % 5 === 0) {
-      setPhase("Rendering", 100*i/steps.length, `frame ${i} of ${steps.length} · ${outW}x${outH}`);
+      setPhase("Rendering", 100*i/total, `frame ${i} of ${total} · ${outW}x${outH} · ${sink.label}`);
       await new Promise(r => setTimeout(r, 0));
     }
   }
   const wall = (performance.now()-t0)/1000;
-  rec.stop();
-  await stopped;
-  const blob = new Blob(chunks, { type: mime.split(";")[0] || "video/webm" });
-  return { blob, outW, outH, wall, frames: steps.length };
+  const blob = await sink.finish();
+  return { blob, outW, outH, wall, frames: total, exact: sink.exact, codec: sink.label };
 }
 
 // ------------------------------------------------------------- wiring ----
@@ -868,6 +1037,8 @@ function supportNote() {
 supportNote();
 
 async function loadFile(file) {
+  // Measuring happens before the marking UI exists, so its progress sits above.
+  ui("markSection").before(ui("progressPanel"));
   fileName = file.name.replace(/\.[^.]+$/, "");
   video.src = URL.createObjectURL(file);
   await new Promise((res, rej) => {
@@ -880,6 +1051,8 @@ async function loadFile(file) {
   FPS = await probeFps(parseFloat(ui("fps").value) || 30);
   ui("fps").value = FPS;
   nFrames = Math.max(2, Math.floor(video.duration*FPS));
+  const capFrames = parseInt(new URLSearchParams(location.search).get("limit") || "0", 10);
+  if (capFrames > 1) nFrames = Math.min(nFrames, capFrames);   // used by the test hooks
   setPhase("Measuring camera path", 0, `${srcW}x${srcH}, ${nFrames} frames at ${FPS} fps`);
   const info = await measurePath(parseInt(ui("trackWidth").value, 10));
   const idx = pickCandidates(10);
@@ -910,6 +1083,8 @@ wireDrop();
 ui("render").onclick = async () => {
   const p = pooled();
   const offset = p ? p.offset : 0;
+  // Rendering is started from the panel above, so its progress goes below it.
+  ui("outPanel").before(ui("progressPanel"));
   ui("render").disabled = true;
   try {
     const r = await renderOutput(parseFloat(ui("lock").value), parseFloat(ui("smooth").value),
@@ -921,13 +1096,14 @@ ui("render").onclick = async () => {
     ui("outPanel").hidden = false;
     ui("progressPanel").hidden = true;
     ui("outNote").textContent =
-      `${r.outW}x${r.outH}, ${r.frames} frames, ${(r.blob.size/1e6).toFixed(1)} MB, rendered in ${r.wall.toFixed(0)}s`;
-    const realFps = r.frames/r.wall;
-    if (Math.abs(realFps - FPS)/FPS > 0.1) {
-      ui("timingWarn").hidden = false;
+      `${r.outW}x${r.outH}, ${r.frames} frames, ${(r.blob.size/1e6).toFixed(1)} MB, ` +
+      `${r.codec}, rendered in ${r.wall.toFixed(0)}s`;
+    ui("timingWarn").hidden = r.exact;
+    if (!r.exact) {
       ui("timingWarn").textContent =
-        `MediaRecorder timestamps frames as they arrive, and rendering ran at ${realFps.toFixed(1)} fps rather than ${FPS}, ` +
-        `so the clip's duration is wrong even though every frame is present and in order. Fix the timing with: ` +
+        `This browser has no WebCodecs VideoEncoder, so MediaRecorder timestamped the frames as they ` +
+        `arrived: every frame is present and in order, but the duration follows render speed ` +
+        `(${(r.frames/r.wall).toFixed(1)} fps) rather than ${FPS}. Fix the timing with: ` +
         `ffmpeg -i ${fileName}-stabilized.webm -fps_mode cfr -r ${FPS} ${fileName}-stabilized.mp4`;
     }
   } catch (e) { showError(e); }
@@ -937,7 +1113,8 @@ ui("render").onclick = async () => {
 // Self-test: ?selftest=<url> measures the path and reports roll statistics so
 // the port can be compared against stabilize.py without clicking anything.
 (async function selftest() {
-  const url = new URLSearchParams(location.search).get("selftest");
+  const params = new URLSearchParams(location.search);
+  const url = params.get("selftest") || params.get("rendertest");
   if (!url) return;
   ui("selftestPanel").hidden = false;
   const out = ui("selftest");
@@ -954,6 +1131,23 @@ ui("render").onclick = async () => {
       staticTail: staticTail(), candidates: candidates.map(c => +c.roll.toFixed(1)),
       seconds: +secs.toFixed(1)
     }, null, 2);
+    if (params.has("rendertest")) {
+      const r = await renderOutput(1.0, 20, parseFloat(params.get("offset") || "0"),
+                                  parseInt(params.get("cap") || "640", 10),
+                                  parseInt(params.get("frames") || "90", 10));
+      const buf = new Uint8Array(await r.blob.arrayBuffer());
+      let s = "";
+      for (let i = 0; i < buf.length; i += 0x8000)
+        s += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+      window.__render = { base64: btoa(s), size: buf.length, codec: r.codec,
+                          exact: r.exact, outW: r.outW, outH: r.outH,
+                          frames: r.frames, wall: +r.wall.toFixed(1) };
+      out.textContent += "\n\nrender: " + JSON.stringify(
+        { codec: r.codec, exact: r.exact, size: buf.length,
+          dims: r.outW + "x" + r.outH, frames: r.frames, seconds: +r.wall.toFixed(1) }, null, 2);
+      document.title = "rendertest-done";
+      return;
+    }
     document.title = "selftest-done";
   } catch (e) {
     out.textContent = "FAILED: " + (e.message || e);
