@@ -32,7 +32,8 @@ def synthetic_steps(n, seed=20261016):
     return steps
 
 
-def main():
+def compute():
+    """Run the pipeline and return everything the fixture records."""
     steps = synthetic_steps(N)
     cx, cy = W / 2, H / 2
     to_c, from_c = S.translation(-cx, -cy), S.translation(cx, cy)
@@ -60,16 +61,21 @@ def main():
     mats = [from_c @ S.similarity(*p) @ to_c for p in poses]
     x0, x1, y0, y1 = S.warped_bounds(mats, W, H)
 
-    out = {
+    return {
         "width": W, "height": H, "lock": LOCK, "sigma": SIGMA, "offsetDeg": OFFSET_DEG,
         "steps": [[float(v) for v in m.flatten()] for m in steps],
         "rollDeg": [float(np.degrees(r)) for r in roll],
         "poses": [[float(v) for v in p] for p in poses],
         "bbox": [float(x0), float(x1), float(y0), float(y1)],
     }
+
+
+def main():
+    out = compute()
     path = pathlib.Path(__file__).parent / "fixture.json"
     path.write_text(json.dumps(out))
-    print(f"wrote {path} — {len(steps)} frames, canvas {x1-x0:.0f}x{y1-y0:.0f}")
+    x0, x1, y0, y1 = out["bbox"]
+    print(f"wrote {path} — {len(out['steps'])} frames, canvas {x1-x0:.0f}x{y1-y0:.0f}")
 
 
 if __name__ == "__main__":

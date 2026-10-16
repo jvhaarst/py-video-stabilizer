@@ -16,13 +16,12 @@ jobs:
           node-version: '22'
 
       - name: Install
-        run: uv pip install --system -e .
+        run: |
+          uv venv
+          uv pip install -e .
 
-      - name: Regenerate the fixture from stabilize.py
-        run: uv run --no-project python tests/make_fixture.py
-
-      - name: Fixture must be unchanged
-        run: git diff --exit-code tests/fixture.json
+      - name: stabilize.py must still produce the committed fixture
+        run: .venv/bin/python tests/check_fixture.py
 
       - name: The browser port must match stabilize.py
         run: node tests/conformance.mjs
