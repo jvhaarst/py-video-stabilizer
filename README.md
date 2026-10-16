@@ -123,6 +123,18 @@ Browsers without `VideoEncoder` fall back to `MediaRecorder`, which produces
 WebM with no audio and wall-clock timing. The page says so and prints the
 `ffmpeg` command that fixes the timing.
 
+Verified at full size: 804 frames at 2606x2210 rendered in 140s (5.7 fps) came
+back as `avg_frame_rate=30/1`, 26.800s of VP9 plus an AAC stereo track, 36 MB.
+At 5.7 fps against a 30 fps source, `MediaRecorder` would have produced a file
+roughly six times too long.
+
+One difference from the command-line version: the browser counts frames as
+`container duration x frame rate`, and a container's duration is the longest of
+its tracks. On the test clip the audio runs to 26.800s while the video track
+ends at 26.733s, so the page renders 804 frames where `stabilize.py` renders
+802, repeating the last image for the extra two. Reading the video track's own
+duration would need a demuxer, which this page deliberately does not have.
+
 ### Vendored dependencies
 
 `vendor/` holds a byte-identical copy of the build that `package.json` pins, so

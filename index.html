@@ -1096,15 +1096,12 @@ ui("render").onclick = async () => {
       const r = await renderOutput(1.0, 20, parseFloat(params.get("offset") || "0"),
                                   parseInt(params.get("cap") || "640", 10),
                                   parseInt(params.get("frames") || "90", 10));
-      const buf = new Uint8Array(await r.blob.arrayBuffer());
-      let s = "";
-      for (let i = 0; i < buf.length; i += 0x8000)
-        s += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
-      window.__render = { base64: btoa(s), size: buf.length, codec: r.codec,
+      window.__renderBlob = r.blob;          // posted straight out; no base64 at full size
+      window.__render = { size: r.blob.size, codec: r.codec, ext: r.ext,
                           exact: r.exact, outW: r.outW, outH: r.outH,
-                          frames: r.frames, wall: +r.wall.toFixed(1) };
+                          hasAudio: r.hasAudio, frames: r.frames, wall: +r.wall.toFixed(1) };
       out.textContent += "\n\nrender: " + JSON.stringify(
-        { codec: r.codec, exact: r.exact, size: buf.length,
+        { codec: r.codec, exact: r.exact, size: r.blob.size,
           dims: r.outW + "x" + r.outH, frames: r.frames, seconds: +r.wall.toFixed(1) }, null, 2);
       document.title = "rendertest-done";
       return;
