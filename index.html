@@ -1,0 +1,965 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Video Stabilizer</title>
+<style>
+  :root {
+    --bg:#f2efe9; --surface:#fff; --sunk:#e7e2d9; --line:#d2cabc;
+    --fg:#23201c; --muted:#6d665b; --accent:#b4651a; --accent-soft:#f3ddc6; --good:#2f6b4f;
+    --display:"Archivo","Helvetica Neue",Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono",Menlo,monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#14161a; --surface:#1c2026; --sunk:#0f1115; --line:#2e353f;
+      --fg:#e8e4dc; --muted:#8f99a6; --accent:#e39b4a; --accent-soft:#3a2b18; --good:#6fc296;
+      color-scheme: dark;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 var(--display);
+       padding:28px max(16px,env(safe-area-inset-left,0px)) 56px}
+  .wrap{max-width:1000px;margin:0 auto;display:flex;flex-direction:column;gap:18px}
+  h1{font-size:clamp(1.4rem,3vw,1.9rem);margin:0 0 6px;letter-spacing:-.015em}
+  .lede{margin:0;color:var(--muted);max-width:66ch}
+  .panel{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px}
+  .drop{border:2px dashed var(--line);border-radius:10px;padding:34px 18px;text-align:center;
+        background:var(--sunk);cursor:pointer}
+  .drop.over{border-color:var(--accent);background:var(--accent-soft)}
+  .drop strong{display:block;font-size:1.05rem;margin-bottom:4px}
+  .drop span{color:var(--muted);font-size:.86rem}
+  canvas{width:100%;display:block;border-radius:4px;touch-action:none;cursor:crosshair;background:#000}
+  .stage{background:var(--sunk);border:1px solid var(--line);border-radius:10px;padding:10px;
+         display:flex;flex-direction:column;gap:10px}
+  .bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  .spacer{flex:1 1 auto}
+  button{font:600 .8rem/1 var(--display);letter-spacing:.03em;text-transform:uppercase;
+         padding:9px 13px;border-radius:6px;border:1px solid var(--line);
+         background:var(--surface);color:var(--fg);cursor:pointer}
+  button:hover{border-color:var(--accent)}
+  button[disabled]{opacity:.4;cursor:default}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  label.opt{display:flex;gap:6px;align-items:center;font-size:.82rem;color:var(--muted)}
+  select,input[type=number]{font:500 .82rem var(--mono);padding:6px 8px;border-radius:5px;
+         border:1px solid var(--line);background:var(--surface);color:var(--fg)}
+  .counter{font-family:var(--mono);font-size:.82rem;color:var(--muted);font-variant-numeric:tabular-nums}
+  .dots{display:flex;flex-wrap:wrap;gap:5px}
+  .dot{min-width:52px;height:26px;padding:0 6px;border-radius:4px;border:1px solid var(--line);
+       background:var(--surface);font:500 .68rem/1 var(--mono);color:var(--muted);
+       display:grid;place-items:center;cursor:pointer;font-variant-numeric:tabular-nums}
+  .dot[data-state=set]{background:var(--accent);border-color:var(--accent);color:#fff}
+  .dot[data-state=skip]{background:var(--sunk);text-decoration:line-through}
+  .dot[data-next=yes]{border-color:var(--accent);border-style:dashed}
+  .dot[data-current=yes]{outline:2px solid var(--fg);outline-offset:1px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:14px}
+  .k{font-size:.7rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+  .v{font-family:var(--mono);font-size:1.3rem;font-weight:600;font-variant-numeric:tabular-nums}
+  .v.dim{color:var(--muted)}
+  .verdict{margin-top:14px;padding:11px 13px;border-radius:7px;background:var(--accent-soft)}
+  .verdict.ok{background:color-mix(in srgb,var(--good) 18%,transparent)}
+  progress{width:100%;height:8px}
+  pre{font-family:var(--mono);background:var(--sunk);border:1px solid var(--line);border-radius:7px;
+      padding:12px;overflow-x:auto;font-size:.78rem;margin:0;white-space:pre-wrap}
+  .hint{font-size:.8rem;color:var(--muted);margin:0}
+  kbd{font-family:var(--mono);font-size:.74rem;border:1px solid var(--line);border-radius:3px;padding:1px 4px}
+  .warn{border-left:3px solid var(--accent);padding-left:10px;color:var(--muted);font-size:.84rem}
+  [hidden]{display:none!important}
+  a.dl{display:inline-block;font:600 .8rem/1 var(--display);text-transform:uppercase;letter-spacing:.03em;
+       padding:10px 14px;border-radius:6px;background:var(--accent);color:#fff;text-decoration:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Video Stabilizer</h1>
+    <p class="lede">Drop in a video. It measures the camera path, asks you to mark the horizon on a few
+      frames, then re-renders the clip with the roll locked and the canvas expanded so nothing is cropped.
+      Everything runs in this page — no upload, no network, no dependencies.</p>
+  </header>
+
+  <div id="dropPanel" class="panel">
+    <div class="drop" id="drop">
+      <strong>Drop a video here</strong>
+      <span>or click to choose one — it never leaves your machine</span>
+      <input type="file" id="file" accept="video/*" hidden>
+    </div>
+    <div class="bar" style="margin-top:12px">
+      <label class="opt">Frame rate
+        <input type="number" id="fps" value="30" min="1" max="120" step="0.001" style="width:92px">
+      </label>
+      <label class="opt">Track width
+        <select id="trackWidth">
+          <option value="640">640 (fast)</option>
+          <option value="960" selected>960 (default)</option>
+        </select>
+      </label>
+      <label class="opt">Output cap
+        <select id="outCap">
+          <option value="1920">1920 (fast)</option>
+          <option value="2560">2560</option>
+          <option value="4096" selected>no limit</option>
+        </select>
+      </label>
+    </div>
+    <p class="hint" id="support" style="margin-top:10px"></p>
+  </div>
+
+  <div class="panel" id="progressPanel" hidden>
+    <div class="k" id="phase">Working</div>
+    <progress id="bar" max="100" value="0"></progress>
+    <p class="hint" id="progressNote"></p>
+  </div>
+
+  <div id="markSection" hidden>
+    <div class="stage">
+      <canvas id="stage" width="768" height="432"></canvas>
+      <div class="bar">
+        <button class="primary" id="accept">Accept line</button>
+        <button id="skip">No horizon</button>
+        <button id="reset">Reset</button>
+        <button id="snap">Snap to edge</button>
+        <span class="spacer"></span>
+        <button id="prev">&larr;</button>
+        <button id="next">&rarr;</button>
+        <button id="preview">Preview level</button>
+      </div>
+      <div class="bar"><span class="counter" id="counter"></span></div>
+      <div class="dots" id="dots"></div>
+      <p class="hint">Drag an <strong>endpoint</strong> to rotate, the <strong>middle</strong> to slide.
+        <kbd>A</kbd> accept, <kbd>S</kbd> skip, <kbd>R</kbd> reset, <kbd>,</kbd><kbd>.</kbd> fine rotate.
+        Snapping is manual on purpose: it chases the strongest edge nearby, which is often a field
+        boundary rather than the horizon.</p>
+    </div>
+
+    <div class="panel" style="margin-top:18px">
+      <div class="grid">
+        <div><div class="k">Frames marked</div><div class="v" id="n">0</div></div>
+        <div><div class="k">Roll offset</div><div class="v" id="offset">&mdash;</div></div>
+        <div><div class="k">Uncertainty</div><div class="v" id="stderr">&mdash;</div></div>
+        <div><div class="k">Roll span</div><div class="v" id="span">&mdash;</div></div>
+      </div>
+      <div class="verdict" id="verdict"></div>
+      <div class="bar" style="margin-top:14px">
+        <button class="primary" id="render">Stabilize and render</button>
+        <label class="opt">Rotation lock
+          <input type="number" id="lock" value="1" min="0" max="1" step="0.1" style="width:72px">
+        </label>
+        <label class="opt">Smoothing
+          <input type="number" id="smooth" value="20" min="1" max="120" step="1" style="width:72px">
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" id="outPanel" hidden>
+    <div class="k">Result</div>
+    <video id="outVideo" controls style="width:100%;margin:10px 0;border-radius:6px;background:#000"></video>
+    <div class="bar"><a class="dl" id="download" download="stabilized.webm">Download</a>
+      <span class="counter" id="outNote"></span></div>
+    <p class="warn" id="timingWarn" hidden></p>
+  </div>
+
+  <div class="panel" id="selftestPanel" hidden><div class="k">Self-test</div><pre id="selftest"></pre></div>
+</div>
+
+<script>
+"use strict";
+// ---------------------------------------------------------------- math ----
+const rad = d => d * Math.PI / 180, deg = r => r * 180 / Math.PI;
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const I3 = () => [1,0,0, 0,1,0, 0,0,1];
+function mul(a, b) {                      // 3x3 row-major
+  const o = new Array(9);
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++)
+    o[r*3+c] = a[r*3]*b[c] + a[r*3+1]*b[3+c] + a[r*3+2]*b[6+c];
+  return o;
+}
+function inv(m) {                         // affine inverse (bottom row is 0,0,1)
+  const [a,b,c, d,e,f] = m, det = a*e - b*d;
+  const ia = e/det, ib = -b/det, id = -d/det, ie = a/det;
+  return [ia, ib, -(ia*c + ib*f), id, ie, -(id*c + ie*f), 0,0,1];
+}
+const trans = (x, y) => [1,0,x, 0,1,y, 0,0,1];
+function sim(angle, scale, tx, ty) {
+  const c = scale*Math.cos(angle), s = scale*Math.sin(angle);
+  return [c,-s,tx, s,c,ty, 0,0,1];
+}
+const decompose = m => ({ angle: Math.atan2(m[3], m[0]), scale: Math.hypot(m[0], m[3]),
+                          tx: m[2], ty: m[5] });
+function unwrap(a) {
+  const o = a.slice();
+  for (let i = 1; i < o.length; i++) {
+    let d = o[i] - o[i-1];
+    while (d > Math.PI) { o[i] -= 2*Math.PI; d = o[i] - o[i-1]; }
+    while (d < -Math.PI) { o[i] += 2*Math.PI; d = o[i] - o[i-1]; }
+  }
+  return o;
+}
+// Quintic ease: zero velocity and acceleration at both ends (Flash & Hogan 1985).
+const minimumJerk = u => { u = clamp(u, 0, 1); return u*u*u*(10 + u*(-15 + 6*u)); };
+
+// ------------------------------------------------------ feature tracking ----
+// Shi-Tomasi corners, one per cell, which spaces them like goodFeaturesToTrack
+// with a minimum distance equal to the cell size.
+function detectFeatures(g, w, h, maskTop, maskBottom, cell = 28) {
+  const y0 = Math.floor(h * maskTop), y1 = Math.floor(h * (1 - maskBottom));
+  const pts = [];
+  for (let cy = y0 + 1; cy < y1 - cell; cy += cell) {
+    for (let cx = 1; cx < w - cell; cx += cell) {
+      let bestS = 0, bx = 0, by = 0;
+      for (let y = cy; y < Math.min(cy + cell, y1 - 1); y += 2) {
+        for (let x = cx; x < Math.min(cx + cell, w - 1); x += 2) {
+          let gxx = 0, gyy = 0, gxy = 0;
+          for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+            const i = (y+dy)*w + (x+dx);
+            const ix = g[i+1] - g[i-1], iy = g[i+w] - g[i-w];
+            gxx += ix*ix; gyy += iy*iy; gxy += ix*iy;
+          }
+          // smaller eigenvalue of the structure tensor
+          const t = gxx + gyy, det = gxx*gyy - gxy*gxy;
+          const s = (t - Math.sqrt(Math.max(0, t*t - 4*det))) / 2;
+          if (s > bestS) { bestS = s; bx = x; by = y; }
+        }
+      }
+      if (bestS > 120) pts.push([bx, by]);
+    }
+  }
+  return pts;
+}
+function pyramid(g, w, h, levels) {
+  const build = (g, w, h) => {
+    // Gradients are computed once per level, not re-sampled per window pixel.
+    const gx = new Float32Array(w*h), gy = new Float32Array(w*h);
+    for (let y = 1; y < h-1; y++) for (let x = 1; x < w-1; x++) {
+      const i = y*w+x;
+      gx[i] = (g[i+1]-g[i-1])*0.5; gy[i] = (g[i+w]-g[i-w])*0.5;
+    }
+    return { g, gx, gy, w, h };
+  };
+  const p = [build(g, w, h)];
+  for (let l = 1; l < levels; l++) {
+    const s = p[l-1], pw = s.w >> 1, ph = s.h >> 1;
+    if (pw < 32 || ph < 32) break;
+    const d = new Float32Array(pw*ph);
+    for (let y = 0; y < ph; y++) for (let x = 0; x < pw; x++) {
+      const i = (y*2)*s.w + x*2;
+      d[y*pw+x] = (s.g[i] + s.g[i+1] + s.g[i+s.w] + s.g[i+s.w+1]) * 0.25;
+    }
+    p.push(build(d, pw, ph));
+  }
+  return p;
+}
+function sample(g, w, h, x, y) {
+  if (x < 0 || y < 0 || x >= w-1 || y >= h-1) return null;
+  const xi = x|0, yi = y|0, fx = x-xi, fy = y-yi, i = yi*w+xi;
+  return g[i]*(1-fx)*(1-fy) + g[i+1]*fx*(1-fy) + g[i+w]*(1-fx)*fy + g[i+w+1]*fx*fy;
+}
+// Pyramidal Lucas-Kanade, coarse to fine, as in stabilize.py's
+// calcOpticalFlowPyrLK. The reference patch is read at integer pixels, so only
+// the warped second image needs bilinear sampling.
+const LK_HALF = 8, LK_ITERS = 12;
+// `pred` is an optional per-point displacement guess at full scale. Camera
+// motion is smooth, so seeding each track with the previous frame's motion
+// leaves only a residual to find. Without it, a fast roll moves features
+// further than the window can see and LK silently returns too little.
+function trackLK(pa, pb, pts, pred) {
+  const out = new Array(pts.length);
+  const top = pa.length - 1, side = LK_HALF*2+1, area = side*side;
+  const ix = new Float32Array(area), iy = new Float32Array(area), tpl = new Float32Array(area);
+  for (let k = 0; k < pts.length; k++) {
+    let vx = 0, vy = 0, ok = true;
+    if (pred && pred[k]) { vx = pred[k][0] / (1 << top) / 2; vy = pred[k][1] / (1 << top) / 2; }
+    for (let l = top; l >= 0; l--) {
+      const A = pa[l], B = pb[l], sc = 1 << l;
+      const px = Math.round(pts[k][0] / sc), py = Math.round(pts[k][1] / sc);
+      vx *= 2; vy *= 2;
+      if (px < LK_HALF+1 || py < LK_HALF+1 || px >= A.w-LK_HALF-1 || py >= A.h-LK_HALF-1) continue;
+      let xx = 0, yy = 0, xy = 0, p = 0;
+      for (let dy = -LK_HALF; dy <= LK_HALF; dy++) {
+        let i = (py+dy)*A.w + px - LK_HALF;
+        for (let dx = -LK_HALF; dx <= LK_HALF; dx++, i++, p++) {
+          const a = A.gx[i], b = A.gy[i];
+          ix[p] = a; iy[p] = b; tpl[p] = A.g[i];
+          xx += a*a; yy += b*b; xy += a*b;
+        }
+      }
+      const det = xx*yy - xy*xy;
+      if (!(Math.abs(det) > 1e-6)) { ok = false; break; }
+      for (let it = 0; it < LK_ITERS; it++) {
+        let bx = 0, by = 0; p = 0;
+        for (let dy = -LK_HALF; dy <= LK_HALF; dy++) {
+          for (let dx = -LK_HALF; dx <= LK_HALF; dx++, p++) {
+            const v = sample(B.g, B.w, B.h, px+vx+dx, py+vy+dy);
+            if (v === null) continue;
+            const dt = tpl[p] - v;
+            bx += dt*ix[p]; by += dt*iy[p];
+          }
+        }
+        const sx = (yy*bx - xy*by)/det, sy = (xx*by - xy*bx)/det;
+        vx += sx; vy += sy;
+        if (sx*sx + sy*sy < 1e-4) break;
+      }
+    }
+    out[k] = ok ? [pts[k][0] + vx, pts[k][1] + vy] : null;
+  }
+  return out;
+}
+// Closed-form similarity fit (Umeyama) plus RANSAC, matching
+// estimateAffinePartial2D with method=RANSAC.
+function fitSimilarity(src, dst, idx) {
+  let mx = 0, my = 0, nx = 0, ny = 0;
+  for (const i of idx) { mx += src[i][0]; my += src[i][1]; nx += dst[i][0]; ny += dst[i][1]; }
+  const n = idx.length; mx /= n; my /= n; nx /= n; ny /= n;
+  let sxx = 0, sxy = 0, varr = 0;
+  for (const i of idx) {
+    const ax = src[i][0]-mx, ay = src[i][1]-my, bx = dst[i][0]-nx, by = dst[i][1]-ny;
+    sxx += ax*bx + ay*by; sxy += ax*by - ay*bx; varr += ax*ax + ay*ay;
+  }
+  if (varr < 1e-9) return null;
+  const a = sxx/varr, b = sxy/varr;
+  return [a,-b, nx - (a*mx - b*my), b,a, ny - (b*mx + a*my), 0,0,1];
+}
+function ransacSimilarity(src, dst, thresh = 3, trials = 180) {
+  const n = src.length;
+  if (n < 6) return null;
+  let bestIn = null, bestCount = 0;
+  for (let t = 0; t < trials; t++) {
+    const i = (Math.random()*n)|0; let j = (Math.random()*n)|0;
+    if (i === j) j = (j+1) % n;
+    const m = fitSimilarity(src, dst, [i, j]);
+    if (!m) continue;
+    const inl = [];
+    for (let k = 0; k < n; k++) {
+      const x = m[0]*src[k][0] + m[1]*src[k][1] + m[2];
+      const y = m[3]*src[k][0] + m[4]*src[k][1] + m[5];
+      if (Math.hypot(x - dst[k][0], y - dst[k][1]) < thresh) inl.push(k);
+    }
+    if (inl.length > bestCount) { bestCount = inl.length; bestIn = inl; }
+    if (bestCount > n*0.85) break;
+  }
+  if (!bestIn || bestCount < 6) return null;
+  return fitSimilarity(src, dst, bestIn);           // refit on all inliers
+}
+
+// ------------------------------------------------------------- video io ----
+const video = document.createElement("video");
+video.muted = true; video.playsInline = true; video.preload = "auto";
+let srcW = 0, srcH = 0, nFrames = 0, FPS = 30, fileName = "video";
+
+function seekTo(t) {
+  return new Promise(res => {
+    const done = () => { video.removeEventListener("seeked", done); res(); };
+    video.addEventListener("seeked", done);
+    video.currentTime = t;
+  });
+}
+async function probeFps(fallback) {
+  if (!("requestVideoFrameCallback" in HTMLVideoElement.prototype)) return fallback;
+  const times = [];
+  await video.play().catch(() => {});
+  await new Promise(res => {
+    const tick = (now, meta) => {
+      times.push(meta.mediaTime);
+      if (times.length >= 24) return res();
+      video.requestVideoFrameCallback(tick);
+    };
+    video.requestVideoFrameCallback(tick);
+    setTimeout(res, 2500);
+  });
+  video.pause();
+  const d = [];
+  for (let i = 1; i < times.length; i++) if (times[i] > times[i-1]) d.push(times[i]-times[i-1]);
+  if (d.length < 6) return fallback;
+  d.sort((a,b) => a-b);
+  const med = d[d.length >> 1];
+  return med > 0.001 ? Math.round(1/med * 1000)/1000 : fallback;
+}
+
+const workCv = document.createElement("canvas");
+const workCtx = workCv.getContext("2d", { willReadFrequently: true });
+function grabGray(w, h) {
+  workCv.width = w; workCv.height = h;
+  workCtx.drawImage(video, 0, 0, w, h);
+  const d = workCtx.getImageData(0, 0, w, h).data;
+  const g = new Float32Array(w*h);
+  for (let p = 0, q = 0; q < g.length; p += 4, q++) g[q] = 0.299*d[p] + 0.587*d[p+1] + 0.114*d[p+2];
+  return g;
+}
+
+// ----------------------------------------------------------- pass 1 ----
+let steps = [], cumulative = [], rollDeg = [], cuts = [];
+const ui = id => document.getElementById(id);
+function setPhase(text, pct, note) {
+  ui("progressPanel").hidden = false;
+  ui("phase").textContent = text;
+  ui("bar").value = pct;
+  ui("progressNote").textContent = note || "";
+}
+
+async function measurePath(trackWidth, maskTop = 0.14, maskBottom = 0.12) {
+  const down = Math.min(1, trackWidth / srcW);
+  const tw = Math.round(srcW*down), th = Math.round(srcH*down);
+  await seekTo(0.5/FPS);
+  let prev = pyramid(grabGray(tw, th), tw, th, 5);
+  steps = [I3()];
+  let lost = 0, dupes = 0;
+  let prevStep = I3();                   // motion guess carried frame to frame
+  for (let i = 1; i < nFrames; i++) {
+    await seekTo((i + 0.5)/FPS);
+    const cur = pyramid(grabGray(tw, th), tw, th, 5);
+    let step = I3(), failed = true;
+
+    // This clip is 25 fps padded to 30 by duplication: one frame in six is
+    // byte-identical to the one before it. Tracking those is pure waste.
+    let sad = 0;
+    for (let q = 0; q < cur[0].g.length; q += 7) sad += Math.abs(cur[0].g[q] - prev[0].g[q]);
+    if (sad / (cur[0].g.length/7) < 0.4) { steps.push(I3()); prev = cur; dupes++; continue; }
+
+    const pts = detectFeatures(prev[0].g, tw, th, maskTop, maskBottom);
+    if (pts.length >= 10) {
+      const pf = pts.map(p => [prevStep[0]*p[0] + prevStep[1]*p[1] + prevStep[2] - p[0],
+                               prevStep[3]*p[0] + prevStep[4]*p[1] + prevStep[5] - p[1]]);
+      const fwd = trackLK(prev, cur, pts, pf);
+      const src = [], dst = [];
+      const back = trackLK(cur, prev, fwd.map((p, k) => p || pts[k]),
+                           pf.map(d => [-d[0], -d[1]]));
+      for (let k = 0; k < pts.length; k++) {
+        if (!fwd[k] || !back[k]) continue;
+        if (Math.hypot(back[k][0]-pts[k][0], back[k][1]-pts[k][1]) > 1.0) continue;  // backward check
+        src.push(pts[k]); dst.push(fwd[k]);
+      }
+      if (src.length >= 10) {
+        const m = ransacSimilarity(src, dst);
+        if (m) {
+          prevStep = m.slice();          // keep it in tracking coordinates
+          m[2] /= down; m[5] /= down;    // report translation at full scale
+          step = m; failed = false;
+        }
+      }
+    }
+    const d = decompose(step);
+    // A jump this large is a shot change, not camera motion.
+    if (failed || Math.hypot(d.tx, d.ty) > 0.5*srcW || d.scale < 0.5 || d.scale > 2) {
+      if (failed) lost++; else cuts.push(i);
+      step = I3();
+    }
+    steps.push(step);
+    prev = cur;
+    if (i % 10 === 0) {
+      setPhase("Measuring camera path", 100*i/nFrames, `frame ${i} of ${nFrames}`);
+      await new Promise(r => setTimeout(r, 0));
+    }
+  }
+  const cx = srcW/2, cy = srcH/2, toC = trans(-cx,-cy), fromC = trans(cx,cy);
+  cumulative = [I3()];
+  for (let i = 1; i < steps.length; i++)
+    cumulative.push(mul(mul(toC, mul(steps[i], fromC)), cumulative[i-1]));
+  rollDeg = unwrap(cumulative.map(m => decompose(m).angle)).map(deg);
+  return { lost, dupes, cuts: cuts.length };
+}
+
+// --------------------------------------------------- candidate frames ----
+// Farthest-point sampling on ROLL: marks at similar attitudes cannot falsify a
+// fixed ground feature, so roll separation is what each extra frame buys.
+let candidates = [], candImages = [], candLuma = [];
+function pickCandidates(count = 10) {
+  const tail = staticTail() ?? nFrames;
+  const pool = [];
+  for (let i = 15; i < tail-15; i++) pool.push(i);
+  if (!pool.length) return [];
+  const gap = Math.round(0.8*FPS);
+  let start = pool[0];
+  for (const i of pool) if (Math.abs(rollDeg[i]) < Math.abs(rollDeg[start])) start = i;
+  const chosen = [start];
+  while (chosen.length < count) {
+    let best = null, bestD = -1;
+    for (const i of pool) {
+      if (chosen.some(c => Math.abs(i-c) < gap)) continue;
+      const d = Math.min(...chosen.map(c => Math.abs(rollDeg[i]-rollDeg[c])));
+      if (d > bestD) { best = i; bestD = d; }
+    }
+    if (best === null || bestD < 2) break;
+    chosen.push(best);
+  }
+  return chosen.sort((a,b) => a-b);
+}
+function staticTail(minSeconds = 0.4) {
+  let start = steps.length;
+  for (let i = steps.length-1; i > 0; i--) {
+    const d = decompose(steps[i]);
+    if (Math.hypot(d.tx, d.ty) > 1.5 || Math.abs(d.angle) > rad(0.3) || Math.abs(d.scale-1) > 0.005) break;
+    start = i;
+  }
+  return (steps.length - start) < minSeconds*FPS ? null : start;
+}
+async function grabCandidates(idx) {
+  candidates = []; candImages = []; candLuma = [];
+  const CW = 768, CH = Math.round(768*srcH/srcW);
+  for (let k = 0; k < idx.length; k++) {
+    await seekTo((idx[k] + 0.5)/FPS);
+    const c = document.createElement("canvas");
+    c.width = CW; c.height = CH;
+    c.getContext("2d").drawImage(video, 0, 0, CW, CH);
+    candidates.push({ index: idx[k], time: idx[k]/FPS, roll: rollDeg[idx[k]] });
+    candImages.push(c);
+    candLuma.push(null);
+    setPhase("Collecting frames to mark", 100*(k+1)/idx.length, `${k+1} of ${idx.length}`);
+    await new Promise(r => setTimeout(r, 0));
+  }
+}
+
+// ------------------------------------------------------- marking UI ----
+const cv = ui("stage"), ctx = cv.getContext("2d");
+let W = 768, H = 432, HALF = 353;
+let marks = [], current = 0, drag = null, working = null, previewOn = false, note = "";
+
+function lineAngle(l) {
+  let a = Math.atan2(l.p1.y-l.p0.y, l.p1.x-l.p0.x);
+  if (a > Math.PI/2) a -= Math.PI;
+  if (a < -Math.PI/2) a += Math.PI;
+  return a;
+}
+// Clip the line to an inset rectangle so a grab handle is never off-image.
+function lineAt(a, mx, my) {
+  const INSET = 14, ca = Math.cos(a), sa = Math.sin(a);
+  mx = clamp(mx, INSET, W-INSET); my = clamp(my, INSET, H-INSET);
+  let t0 = -1e5, t1 = 1e5;
+  const lo = [INSET-mx, INSET-my], hi = [W-INSET-mx, H-INSET-my], d = [ca, sa];
+  for (let k = 0; k < 2; k++) {
+    if (Math.abs(d[k]) < 1e-9) continue;
+    let e0 = lo[k]/d[k], e1 = hi[k]/d[k];
+    if (e0 > e1) { const s = e0; e0 = e1; e1 = s; }
+    t0 = Math.max(t0, e0); t1 = Math.min(t1, e1);
+  }
+  if (!(t0 < t1)) { t0 = -HALF; t1 = HALF; }
+  return { p0: { x: mx+ca*t0, y: my+sa*t0 }, p1: { x: mx+ca*t1, y: my+sa*t1 } };
+}
+const midOf = l => ({ x: (l.p0.x+l.p1.x)/2, y: (l.p0.y+l.p1.y)/2 });
+
+function pooled() {
+  let sx = 0, sy = 0, n = 0; const world = [], rolls = [];
+  marks.forEach((m, i) => {
+    if (!m || m === "skip") return;
+    const w = lineAngle(m) - rad(candidates[i].roll);
+    world.push(w); rolls.push(candidates[i].roll);
+    sx += Math.cos(2*w); sy += Math.sin(2*w); n++;
+  });
+  if (!n) return null;
+  const mean = Math.atan2(sy/n, sx/n)/2;
+  const res = world.map(w => Math.atan2(Math.sin(2*(w-mean)), Math.cos(2*(w-mean)))/2);
+  const sd = Math.sqrt(res.reduce((a,r) => a+r*r, 0)/res.length);
+  return { n, mean, offset: -deg(mean), scatter: deg(sd), stderr: deg(sd)/Math.sqrt(n),
+           spread: Math.max(...rolls) - Math.min(...rolls) };
+}
+function lumaOf(i) {
+  if (candLuma[i]) return candLuma[i];
+  const c = candImages[i], x = c.getContext("2d", { willReadFrequently: true });
+  const d = x.getImageData(0, 0, W, H).data, g = new Float32Array(W*H);
+  for (let p = 0, q = 0; q < g.length; p += 4, q++) g[q] = 0.299*d[p] + 0.587*d[p+1] + 0.114*d[p+2];
+  candLuma[i] = g;
+  return g;
+}
+function snapToEdge(i, angle, mid) {
+  const g = lumaOf(i);
+  const at = (x,y) => (x<1||y<1||x>=W-1||y>=H-1) ? null : g[(y|0)*W + (x|0)];
+  const BAND = 9, N = 56;
+  let best = null;
+  for (let da = -7; da <= 7; da += 0.5) {
+    const a = angle + rad(da), ca = Math.cos(a), sa = Math.sin(a), px = -sa, py = ca;
+    for (let off = -45; off <= 45; off += 3) {
+      const mx = mid.x + px*off, my = mid.y + py*off;
+      let sum = 0, pos = 0, cnt = 0;
+      for (let s = 0; s < N; s++) {
+        const t = (s/(N-1) - 0.5)*2*HALF;
+        const x = mx + ca*t, y = my + sa*t;
+        const lo = at(x+px*BAND, y+py*BAND), hi = at(x-px*BAND, y-py*BAND);
+        if (lo === null || hi === null) continue;
+        const dd = lo-hi; sum += dd; if (dd > 0) pos++; cnt++;
+      }
+      if (cnt < N*0.6) continue;
+      const mean = sum/cnt, cons = Math.max(pos, cnt-pos)/cnt, q = Math.abs(mean)*cons;
+      if (!best || q > best.q) best = { q, a, mx, my, cons };
+    }
+  }
+  if (!best || best.cons < 0.75 || best.q < 6) return null;
+  return lineAt(best.a, best.mx, best.my);
+}
+function seedFor(i) {
+  const p = pooled();
+  if (!p) return { line: lineAt(0, W/2, H/2), source: "flat start" };
+  return { line: lineAt(p.mean + rad(candidates[i].roll), W/2, H/2),
+           source: "predicted from your marks" };
+}
+function shownLine(i) {
+  if (i === current && working) return { line: working, source: "editing" };
+  const m = marks[i];
+  if (m && m !== "skip") return { line: m, source: "marked" };
+  return seedFor(i);
+}
+function mostInformative() {
+  const p = pooled();
+  let best = null, bestD = -1;
+  candidates.forEach((f, i) => {
+    if (marks[i]) return;
+    const d = p ? Math.min(...marks.map((m,j) => (m && m!=="skip") ? Math.abs(f.roll-candidates[j].roll) : Infinity))
+                : Math.abs(f.roll);
+    if (d > bestD) { best = i; bestD = d; }
+  });
+  return best;
+}
+function drawMark() {
+  const f = candidates[current], p = pooled(), s = shownLine(current);
+  ctx.save();
+  ctx.fillStyle = "#000"; ctx.fillRect(0,0,W,H);
+  if (previewOn && p) {
+    ctx.translate(W/2, H/2); ctx.rotate(rad(p.offset - f.roll)); ctx.scale(0.62, 0.62);
+    ctx.translate(-W/2, -H/2);
+  }
+  ctx.drawImage(candImages[current], 0, 0);
+  ctx.restore();
+  if (previewOn && p) {
+    ctx.save(); ctx.strokeStyle = "rgba(255,255,255,.45)"; ctx.lineWidth = 1; ctx.setLineDash([7,7]);
+    ctx.beginPath(); ctx.moveTo(0, H/2); ctx.lineTo(W, H/2); ctx.stroke(); ctx.restore();
+  } else if (marks[current] !== "skip") {
+    const committed = s.source === "marked" || s.source === "editing";
+    ctx.save(); ctx.setLineDash(committed ? [] : [9,7]);
+    ctx.strokeStyle = "rgba(0,0,0,.55)"; ctx.lineWidth = 4.5;
+    ctx.beginPath(); ctx.moveTo(s.line.p0.x, s.line.p0.y); ctx.lineTo(s.line.p1.x, s.line.p1.y); ctx.stroke();
+    ctx.strokeStyle = "#e39b4a"; ctx.lineWidth = 2.2;
+    ctx.beginPath(); ctx.moveTo(s.line.p0.x, s.line.p0.y); ctx.lineTo(s.line.p1.x, s.line.p1.y); ctx.stroke();
+    ctx.setLineDash([]);
+    [s.line.p0, s.line.p1].forEach(pt => {
+      ctx.beginPath(); ctx.arc(pt.x, pt.y, 7, 0, Math.PI*2);
+      ctx.fillStyle = committed ? "#e39b4a" : "rgba(227,155,74,.5)"; ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,.6)"; ctx.lineWidth = 1.5; ctx.stroke();
+    });
+    ctx.restore();
+  }
+  renderStats(s);
+}
+function renderStats(s) {
+  const f = candidates[current], m = marks[current], p = pooled(), nxt = mostInformative();
+  ui("counter").textContent = `frame ${f.index} · ${f.time.toFixed(1)}s · roll ${f.roll>=0?"+":""}${f.roll.toFixed(1)}° · ` +
+    (m === "skip" ? "no horizon"
+     : `line ${deg(lineAngle(s.line))>=0?"+":""}${deg(lineAngle(s.line)).toFixed(1)}° — ${note || s.source}`);
+  ui("dots").replaceChildren(...candidates.map((fr, i) => {
+    const b = document.createElement("button");
+    b.className = "dot";
+    b.textContent = `${fr.roll>=0?"+":""}${fr.roll.toFixed(0)}°`;
+    b.dataset.state = marks[i] === "skip" ? "skip" : marks[i] ? "set" : "open";
+    if (i === current) b.dataset.current = "yes";
+    if (i === nxt && !marks[i]) b.dataset.next = "yes";
+    b.onclick = () => { working = null; note = ""; current = i; drawMark(); };
+    return b;
+  }));
+  const set = (id, v, dim) => { const e = ui(id); e.textContent = v; e.classList.toggle("dim", !!dim); };
+  set("n", p ? p.n : 0, !p);
+  set("offset", p ? `${p.offset>=0?"+":""}${p.offset.toFixed(1)}°` : "—", !p);
+  set("stderr", p && p.n > 1 ? `±${p.stderr.toFixed(1)}°` : "—", !(p && p.n > 1));
+  set("span", p ? `${p.spread.toFixed(0)}°` : "—", !p);
+  const v = ui("verdict");
+  if (!p) {
+    v.className = "verdict";
+    v.textContent = "Mark the first frame; each later frame opens with the line already predicted.";
+    return;
+  }
+  const enough = p.n >= 3 && p.spread > 40 && p.stderr < 4;
+  v.className = "verdict" + (enough ? " ok" : "");
+  v.textContent = enough
+    ? `Enough. ${p.n} marks spanning ${p.spread.toFixed(0)}° of camera roll give ${p.offset.toFixed(1)}° ± ${p.stderr.toFixed(1)}°. Marks that far apart in attitude cannot agree this closely on a fixed feature like a road or a river.`
+    : p.spread <= 40
+      ? `${p.n} mark${p.n===1?"":"s"} spanning ${p.spread.toFixed(0)}° of roll. Keep going until the span passes 40°: only marks at clearly different attitudes show you are on the horizon and not on a road.`
+      : `${p.n} marks spanning ${p.spread.toFixed(0)}° of roll, ${p.offset.toFixed(1)}° ± ${p.stderr.toFixed(1)}°. One or two more will pull the uncertainty under 4°.`;
+}
+function toImage(ev) {
+  const r = cv.getBoundingClientRect();
+  return { x: clamp((ev.clientX-r.left)*W/r.width, 0, W), y: clamp((ev.clientY-r.top)*H/r.height, 0, H) };
+}
+const near = (a,b) => Math.hypot(a.x-b.x, a.y-b.y) < 16;
+cv.addEventListener("pointerdown", ev => {
+  if (previewOn || !candidates.length) return;
+  cv.setPointerCapture(ev.pointerId);
+  const pt = toImage(ev), s = shownLine(current);
+  working = { p0: {...s.line.p0}, p1: {...s.line.p1} };
+  drag = near(pt, working.p0) ? { mode: "p0" } : near(pt, working.p1) ? { mode: "p1" }
+       : { mode: "move", from: pt };
+  drawMark();
+});
+cv.addEventListener("pointermove", ev => {
+  if (!drag || !working) return;
+  const pt = toImage(ev);
+  if (drag.mode === "move") {
+    const dx = pt.x-drag.from.x, dy = pt.y-drag.from.y;
+    working.p0.x += dx; working.p0.y += dy; working.p1.x += dx; working.p1.y += dy;
+    drag.from = pt;
+  } else working[drag.mode] = pt;
+  drawMark();
+});
+cv.addEventListener("pointerup", () => {
+  if (!drag || !working) return;
+  const mid = midOf(working);
+  marks[current] = lineAt(lineAngle(working), mid.x, mid.y);
+  working = null; drag = null; note = ""; drawMark();
+});
+function commit() {
+  const s = shownLine(current);
+  marks[current] = { p0: {...s.line.p0}, p1: {...s.line.p1} };
+  working = null;
+}
+function advance() { const n = mostInformative(); if (n !== null) current = n; working = null; note = ""; drawMark(); }
+function rotate(d) {
+  const s = shownLine(current), mid = midOf(s.line);
+  marks[current] = lineAt(lineAngle(s.line)+rad(d), mid.x, mid.y);
+  working = null; drawMark();
+}
+const browse = d => { working = null; note = ""; current = (current+d+candidates.length)%candidates.length; drawMark(); };
+ui("accept").onclick = () => { commit(); advance(); };
+ui("skip").onclick = () => { marks[current] = "skip"; working = null; advance(); };
+ui("reset").onclick = () => { marks[current] = null; working = null; note = ""; drawMark(); };
+ui("prev").onclick = () => browse(-1);
+ui("next").onclick = () => browse(1);
+ui("snap").onclick = () => {
+  const s = shownLine(current), a = lineAngle(s.line);
+  const fixed = snapToEdge(current, a, midOf(s.line));
+  if (!fixed) { note = "no clear edge nearby — unchanged"; drawMark(); return; }
+  const moved = deg(lineAngle(fixed)-a);
+  marks[current] = fixed; working = null;
+  note = `snapped ${moved>=0?"+":""}${moved.toFixed(1)}° — check it`;
+  drawMark();
+};
+ui("preview").onclick = ev => { previewOn = !previewOn; ev.currentTarget.classList.toggle("primary", previewOn); drawMark(); };
+addEventListener("keydown", ev => {
+  if (ui("markSection").hidden) return;
+  const k = ev.key.toLowerCase();
+  if (ev.key === "ArrowLeft") browse(-1);
+  else if (ev.key === "ArrowRight") browse(1);
+  else if (k === "a") { commit(); advance(); }
+  else if (k === "s") { marks[current] = "skip"; working = null; advance(); }
+  else if (k === "r") { marks[current] = null; working = null; note = ""; drawMark(); }
+  else if (ev.key === ",") rotate(-0.25);
+  else if (ev.key === ".") rotate(0.25);
+  else return;
+  ev.preventDefault();
+});
+
+// ------------------------------------------------------- pass 2 render ----
+function localAveragePose(i, j0, j1, sigma) {
+  const invI = inv(cumulative[i]);
+  let wsum = 0, sa = 0, ca = 0, ls = 0, tx = 0, ty = 0;
+  for (let j = j0; j <= j1; j++) {
+    const d = decompose(mul(cumulative[j], invI));
+    const w = Math.exp(-0.5*((j-i)/sigma)**2);
+    wsum += w; sa += w*Math.sin(d.angle); ca += w*Math.cos(d.angle);
+    ls += w*Math.log(Math.max(d.scale, 1e-6)); tx += w*d.tx; ty += w*d.ty;
+  }
+  return { angle: Math.atan2(sa, ca), scale: Math.exp(ls/wsum), tx: tx/wsum, ty: ty/wsum };
+}
+function segmentBounds() {
+  const edges = [0, ...cuts, steps.length];
+  const lo = new Int32Array(steps.length), hi = new Int32Array(steps.length);
+  for (let e = 0; e < edges.length-1; e++)
+    for (let i = edges[e]; i < edges[e+1]; i++) { lo[i] = edges[e]; hi[i] = edges[e+1]-1; }
+  return { lo, hi };
+}
+function buildPoses(lock, sigma, offsetDeg, maxShiftFrac = 0.35) {
+  const { lo, hi } = segmentBounds();
+  const radius = Math.max(1, Math.round(3*sigma));
+  const offset = rad(offsetDeg), cap = maxShiftFrac*Math.min(srcW, srcH);
+  const roll = rollDeg.map(rad);
+  const poses = [];
+  for (let i = 0; i < steps.length; i++) {
+    const j0 = Math.max(lo[i], i-radius), j1 = Math.min(hi[i], i+radius);
+    const a = localAveragePose(i, j0, j1, sigma);
+    const angle = (1-lock)*a.angle + lock*(offset - roll[i]);
+    let { tx, ty } = a;
+    const shift = Math.hypot(tx, ty);
+    if (shift > cap) { tx = tx*cap/shift; ty = ty*cap/shift; }
+    poses.push({ angle, scale: a.scale, tx, ty });
+  }
+  return poses;
+}
+function posesToMatrices(poses) {
+  // The local average is already measured RELATIVE to frame i, so it applies
+  // straight to that frame's pixels; no inverse of the cumulative path here.
+  const cx = srcW/2, cy = srcH/2, toC = trans(-cx,-cy), fromC = trans(cx,cy);
+  return poses.map(p => mul(mul(fromC, sim(p.angle, p.scale, p.tx, p.ty)), toC));
+}
+function boundsOf(mats, upto) {
+  let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+  const corners = [[0,0],[srcW,0],[srcW,srcH],[0,srcH]];
+  for (let i = 0; i < upto; i++) for (const [X,Y] of corners) {
+    const x = mats[i][0]*X + mats[i][1]*Y + mats[i][2];
+    const y = mats[i][3]*X + mats[i][4]*Y + mats[i][5];
+    x0 = Math.min(x0,x); x1 = Math.max(x1,x); y0 = Math.min(y0,y); y1 = Math.max(y1,y);
+  }
+  return { x0, x1, y0, y1 };
+}
+
+async function renderOutput(lock, sigma, offsetDeg, cap) {
+  const cx = srcW/2, cy = srcH/2;
+  const poses = buildPoses(lock, sigma, offsetDeg);
+  let mats = posesToMatrices(poses);
+  const tail = staticTail();
+  const b = boundsOf(mats, tail ?? steps.length);
+
+  if (tail) {
+    // Ease the correction off onto the static end card so it lands square and
+    // centred, carrying the incoming motion into the settle (minimum jerk).
+    const target = { angle: 0, scale: 1, tx: (b.x0+b.x1)/2 - cx, ty: (b.y0+b.y1)/2 - cy };
+    const ramp = Math.max(1, Math.round(0.6*FPS)), start = Math.max(0, tail-ramp);
+    for (let i = start; i < poses.length; i++) {
+      const e = minimumJerk((i-start)/ramp), p = poses[i];
+      poses[i] = { angle: (1-e)*p.angle, scale: Math.exp((1-e)*Math.log(Math.max(p.scale,1e-6))),
+                   tx: (1-e)*p.tx + e*target.tx, ty: (1-e)*p.ty + e*target.ty };
+    }
+    mats = posesToMatrices(poses);
+  }
+
+  const boxW = b.x1-b.x0, boxH = b.y1-b.y0;
+  const z = Math.min(1, cap/Math.max(boxW, boxH));
+  const outW = Math.max(2, Math.round(boxW*z) & ~1), outH = Math.max(2, Math.round(boxH*z) & ~1);
+  const place = [z,0,-z*b.x0, 0,z,-z*b.y0, 0,0,1];
+
+  const out = document.createElement("canvas");
+  out.width = outW; out.height = outH;
+  const octx = out.getContext("2d");
+  const stream = out.captureStream(0);
+  const track = stream.getVideoTracks()[0];
+  const types = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+  const mime = types.find(t => MediaRecorder.isTypeSupported(t)) || "";
+  const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 12e6 });
+  const chunks = [];
+  rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  const stopped = new Promise(r => { rec.onstop = r; });
+  rec.start();
+
+  const t0 = performance.now();
+  for (let i = 0; i < steps.length; i++) {
+    await seekTo((i + 0.5)/FPS);
+    const m = mul(place, mats[i]);
+    octx.setTransform(1,0,0,1,0,0);
+    octx.fillStyle = "#000"; octx.fillRect(0,0,outW,outH);
+    octx.setTransform(m[0], m[3], m[1], m[4], m[2], m[5]);   // a,b,c,d,e,f
+    octx.drawImage(video, 0, 0);
+    track.requestFrame();
+    if (i % 5 === 0) {
+      setPhase("Rendering", 100*i/steps.length, `frame ${i} of ${steps.length} · ${outW}x${outH}`);
+      await new Promise(r => setTimeout(r, 0));
+    }
+  }
+  const wall = (performance.now()-t0)/1000;
+  rec.stop();
+  await stopped;
+  const blob = new Blob(chunks, { type: mime.split(";")[0] || "video/webm" });
+  return { blob, outW, outH, wall, frames: steps.length };
+}
+
+// ------------------------------------------------------------- wiring ----
+function supportNote() {
+  const miss = [];
+  if (!("captureStream" in HTMLCanvasElement.prototype)) miss.push("canvas.captureStream");
+  if (typeof MediaRecorder === "undefined") miss.push("MediaRecorder");
+  ui("support").textContent = miss.length
+    ? `This browser is missing ${miss.join(" and ")}, so rendering will not work. Use Chrome, Edge or Firefox.`
+    : "Decoding uses the <video> element and encoding uses MediaRecorder, so nothing is downloaded or sent anywhere.";
+}
+supportNote();
+
+async function loadFile(file) {
+  fileName = file.name.replace(/\.[^.]+$/, "");
+  video.src = URL.createObjectURL(file);
+  await new Promise((res, rej) => {
+    video.onloadedmetadata = res;
+    video.onerror = () => rej(new Error("this browser cannot decode that file"));
+  });
+  srcW = video.videoWidth; srcH = video.videoHeight;
+  W = 768; H = Math.round(768*srcH/srcW); HALF = W*0.46;
+  cv.width = W; cv.height = H;
+  FPS = await probeFps(parseFloat(ui("fps").value) || 30);
+  ui("fps").value = FPS;
+  nFrames = Math.max(2, Math.floor(video.duration*FPS));
+  setPhase("Measuring camera path", 0, `${srcW}x${srcH}, ${nFrames} frames at ${FPS} fps`);
+  const info = await measurePath(parseInt(ui("trackWidth").value, 10));
+  const idx = pickCandidates(10);
+  await grabCandidates(idx);
+  marks = candidates.map(() => null);
+  current = 0;
+  ui("progressPanel").hidden = true;
+  ui("markSection").hidden = false;
+  drawMark();
+  return info;
+}
+function wireDrop() {
+  const d = ui("drop"), f = ui("file");
+  d.onclick = () => f.click();
+  f.onchange = () => f.files[0] && loadFile(f.files[0]).catch(showError);
+  ["dragenter","dragover"].forEach(e => d.addEventListener(e, ev => { ev.preventDefault(); d.classList.add("over"); }));
+  ["dragleave","drop"].forEach(e => d.addEventListener(e, ev => { ev.preventDefault(); d.classList.remove("over"); }));
+  d.addEventListener("drop", ev => {
+    const file = ev.dataTransfer.files[0];
+    if (file) loadFile(file).catch(showError);
+  });
+}
+function showError(err) {
+  setPhase("Stopped", 0, err.message || String(err));
+}
+wireDrop();
+
+ui("render").onclick = async () => {
+  const p = pooled();
+  const offset = p ? p.offset : 0;
+  ui("render").disabled = true;
+  try {
+    const r = await renderOutput(parseFloat(ui("lock").value), parseFloat(ui("smooth").value),
+                                 offset, parseInt(ui("outCap").value, 10));
+    const url = URL.createObjectURL(r.blob);
+    ui("outVideo").src = url;
+    ui("download").href = url;
+    ui("download").download = `${fileName}-stabilized.webm`;
+    ui("outPanel").hidden = false;
+    ui("progressPanel").hidden = true;
+    ui("outNote").textContent =
+      `${r.outW}x${r.outH}, ${r.frames} frames, ${(r.blob.size/1e6).toFixed(1)} MB, rendered in ${r.wall.toFixed(0)}s`;
+    const realFps = r.frames/r.wall;
+    if (Math.abs(realFps - FPS)/FPS > 0.1) {
+      ui("timingWarn").hidden = false;
+      ui("timingWarn").textContent =
+        `MediaRecorder timestamps frames as they arrive, and rendering ran at ${realFps.toFixed(1)} fps rather than ${FPS}, ` +
+        `so the clip's duration is wrong even though every frame is present and in order. Fix the timing with: ` +
+        `ffmpeg -i ${fileName}-stabilized.webm -fps_mode cfr -r ${FPS} ${fileName}-stabilized.mp4`;
+    }
+  } catch (e) { showError(e); }
+  ui("render").disabled = false;
+};
+
+// Self-test: ?selftest=<url> measures the path and reports roll statistics so
+// the port can be compared against stabilize.py without clicking anything.
+(async function selftest() {
+  const url = new URLSearchParams(location.search).get("selftest");
+  if (!url) return;
+  ui("selftestPanel").hidden = false;
+  const out = ui("selftest");
+  try {
+    const blob = await (await fetch(url)).blob();
+    const t0 = performance.now();
+    const info = await loadFile(new File([blob], "selftest.mp4", { type: blob.type }));
+    const secs = (performance.now()-t0)/1000;
+    const min = Math.min(...rollDeg), max = Math.max(...rollDeg);
+    out.textContent = JSON.stringify({
+      frames: nFrames, fps: FPS, size: `${srcW}x${srcH}`,
+      rollMin: +min.toFixed(2), rollMax: +max.toFixed(2), rollPeakToPeak: +(max-min).toFixed(2),
+      lost: info.lost, duplicateFrames: info.dupes, cuts: info.cuts,
+      staticTail: staticTail(), candidates: candidates.map(c => +c.roll.toFixed(1)),
+      seconds: +secs.toFixed(1)
+    }, null, 2);
+    document.title = "selftest-done";
+  } catch (e) {
+    out.textContent = "FAILED: " + (e.message || e);
+    document.title = "selftest-failed";
+  }
+})();
+</script>
+</body>
+</html>

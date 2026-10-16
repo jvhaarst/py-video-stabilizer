@@ -1,0 +1,14 @@
+# Source and rendered footage stays out of the repository.
+*.mp4
+*.webm
+*.mov
+*.mkv
+
+# Clip-specific marker build: embeds stills from whatever video made it.
+horizon_app.html
+horizon_frames.json
+
+.venv/
+__pycache__/
+*.pyc
+.claude/

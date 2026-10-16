@@ -1,0 +1,28 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install
+        run: uv pip install --system -e .
+
+      - name: Regenerate the fixture from stabilize.py
+        run: uv run --no-project python tests/make_fixture.py
+
+      - name: Fixture must be unchanged
+        run: git diff --exit-code tests/fixture.json
+
+      - name: The browser port must match stabilize.py
+        run: node tests/conformance.mjs
