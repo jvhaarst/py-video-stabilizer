@@ -164,6 +164,7 @@
   <div class="panel" id="selftestPanel" hidden><div class="k">Self-test</div><pre id="selftest"></pre></div>
 </div>
 
+<script src="vendor/mp4-muxer.js"></script>
 <script>
 "use strict";
 // ---------------------------------------------------------------- math ----
@@ -346,7 +347,7 @@ function ransacSimilarity(src, dst, thresh = 3, trials = 180) {
 // ------------------------------------------------------------- video io ----
 const video = document.createElement("video");
 video.muted = true; video.playsInline = true; video.preload = "auto";
-let srcW = 0, srcH = 0, nFrames = 0, FPS = 30, fileName = "video";
+let srcW = 0, srcH = 0, nFrames = 0, FPS = 30, fileName = "video", sourceFile = null;
 
 function seekTo(t) {
   return new Promise(res => {
@@ -797,140 +798,94 @@ function boundsOf(mats, upto) {
   return { x0, x1, y0, y1 };
 }
 
-// --------------------------------------------------------- webm muxing ----
-// MediaRecorder timestamps frames as they arrive from the canvas, which is
-// wall-clock time, so a render slower than real time produces a file whose
-// duration is wrong. WebCodecs lets us stamp each frame ourselves. It has no
-// container though, so this writes the minimal EBML needed for one video
-// track: header, Info, Tracks, then Clusters of SimpleBlocks.
-const EL = {
-  EBML: [0x1A,0x45,0xDF,0xA3], DocType: [0x42,0x82], DocTypeVersion: [0x42,0x87],
-  DocTypeReadVersion: [0x42,0x85], EBMLVersion: [0x42,0x86], EBMLReadVersion: [0x42,0xF7],
-  EBMLMaxIDLength: [0x42,0xF2], EBMLMaxSizeLength: [0x42,0xF3],
-  Segment: [0x18,0x53,0x80,0x67], Info: [0x15,0x49,0xA9,0x66],
-  TimecodeScale: [0x2A,0xD7,0xB1], MuxingApp: [0x4D,0x80], WritingApp: [0x57,0x41],
-  Duration: [0x44,0x89], Tracks: [0x16,0x54,0xAE,0x6B], TrackEntry: [0xAE],
-  TrackNumber: [0xD7], TrackUID: [0x73,0xC5], TrackType: [0x83], CodecID: [0x86],
-  DefaultDuration: [0x23,0xE3,0x83], Video: [0xE0], PixelWidth: [0xB0], PixelHeight: [0xBA],
-  Cluster: [0x1F,0x43,0xB6,0x75], Timecode: [0xE7], SimpleBlock: [0xA3],
-};
-function vint(n) {                       // EBML size, shortest form that fits
-  for (let len = 1; len <= 8; len++) {
-    const max = 2 ** (7*len) - 1;
-    if (n < max) {
-      const b = new Uint8Array(len);
-      let v = n;
-      for (let i = len-1; i >= 0; i--) { b[i] = v & 0xff; v = Math.floor(v / 256); }
-      b[0] |= 1 << (8-len);
-      return b;
-    }
-  }
-  throw new Error("value too large for EBML");
-}
-function uintBytes(n) {
-  const b = [];
-  do { b.unshift(n & 0xff); n = Math.floor(n / 256); } while (n > 0);
-  return new Uint8Array(b);
-}
-function el(id, payload) {
-  const size = vint(payload.length);
-  const out = new Uint8Array(id.length + size.length + payload.length);
-  out.set(id, 0); out.set(size, id.length); out.set(payload, id.length + size.length);
-  return out;
-}
-const cat = parts => {
-  const total = parts.reduce((a, p) => a + p.length, 0);
-  const out = new Uint8Array(total);
-  let o = 0;
-  for (const p of parts) { out.set(p, o); o += p.length; }
-  return out;
-};
-const elUint = (id, n) => el(id, uintBytes(n));
-const elStr = (id, s) => el(id, new TextEncoder().encode(s));
-function elFloat(id, v) {
-  const b = new Uint8Array(8);
-  new DataView(b.buffer).setFloat64(0, v, false);
-  return el(id, b);
-}
-function buildWebM(frames, width, height, fps, codecId) {
-  const SCALE_MS = 1;                    // TimecodeScale 1e6 ns, so units are ms
-  const header = el(EL.EBML, cat([
-    elUint(EL.EBMLVersion, 1), elUint(EL.EBMLReadVersion, 1),
-    elUint(EL.EBMLMaxIDLength, 4), elUint(EL.EBMLMaxSizeLength, 8),
-    elStr(EL.DocType, "webm"), elUint(EL.DocTypeVersion, 2), elUint(EL.DocTypeReadVersion, 2),
-  ]));
-  const durationMs = frames.length * 1000 / fps;
-  const info = el(EL.Info, cat([
-    elUint(EL.TimecodeScale, 1000000),
-    elStr(EL.MuxingApp, "py-video-stabilizer"), elStr(EL.WritingApp, "py-video-stabilizer"),
-    elFloat(EL.Duration, durationMs / SCALE_MS),
-  ]));
-  const tracks = el(EL.Tracks, el(EL.TrackEntry, cat([
-    elUint(EL.TrackNumber, 1), elUint(EL.TrackUID, 1), elUint(EL.TrackType, 1),
-    elStr(EL.CodecID, codecId), elUint(EL.DefaultDuration, Math.round(1e9 / fps)),
-    el(EL.Video, cat([elUint(EL.PixelWidth, width), elUint(EL.PixelHeight, height)])),
-  ])));
-
-  // A SimpleBlock's timecode is a signed 16-bit offset from its cluster, so
-  // start a new cluster on every keyframe and before that range runs out.
-  const clusters = [];
-  let blocks = [], clusterStart = 0;
-  const flushCluster = () => {
-    if (!blocks.length) return;
-    clusters.push(el(EL.Cluster, cat([elUint(EL.Timecode, clusterStart), ...blocks])));
-    blocks = [];
-  };
-  for (const f of frames) {
-    const ms = Math.round(f.timestampUs / 1000);
-    if (!blocks.length || (f.key && ms - clusterStart > 0) || ms - clusterStart > 30000) {
-      flushCluster();
-      clusterStart = ms;
-    }
-    const rel = ms - clusterStart;
-    const body = new Uint8Array(4 + f.data.length);
-    body[0] = 0x81;                                  // track 1 as a 1-byte vint
-    new DataView(body.buffer).setInt16(1, rel, false);
-    body[3] = f.key ? 0x80 : 0x00;                   // keyframe flag
-    body.set(f.data, 4);
-    blocks.push(el(EL.SimpleBlock, body));
-  }
-  flushCluster();
-
-  return new Blob([header, el(EL.Segment, cat([info, tracks, ...clusters]))],
-                  { type: "video/webm" });
-}
-
+// ----------------------------------------------------------- encoding ----
 async function pickVideoCodec(width, height, fps) {
   if (typeof VideoEncoder === "undefined") return null;
   const bitrate = Math.min(40e6, Math.max(6e6, Math.round(width*height*fps*0.08)));
-  for (const [codec, codecId] of [["vp09.00.10.08", "V_VP9"], ["vp8", "V_VP8"]]) {
+  // VP9 first: the expanded canvas routinely exceeds the macroblock limits that
+  // H.264 levels advertise, and a hardware encoder may simply refuse it.
+  for (const [codec, muxCodec] of [["vp09.00.10.08", "vp9"], ["avc1.640034", "avc"]]) {
     const config = { codec, width, height, bitrate, framerate: fps };
     try {
       const s = await VideoEncoder.isConfigSupported(config);
-      if (s && s.supported) return { config, codecId };
+      if (s && s.supported) return { config, muxCodec };
     } catch (e) { /* try the next codec */ }
   }
   return null;
 }
 
+// The source audio is decoded to PCM and re-encoded as AAC. The <video>
+// element hands us pixels, never the original encoded audio packets, so
+// passthrough is not available and this is the honest route.
+async function probeAudio(file) {
+  if (typeof AudioEncoder === "undefined" || !file) return null;
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const decoded = await ctx.decodeAudioData(await file.arrayBuffer());
+    ctx.close();
+    if (!decoded || !decoded.numberOfChannels) return null;
+    const numberOfChannels = Math.min(2, decoded.numberOfChannels);
+    const config = { codec: "mp4a.40.2", sampleRate: decoded.sampleRate,
+                     numberOfChannels, bitrate: 128000 };
+    const s = await AudioEncoder.isConfigSupported(config);
+    if (!s || !s.supported) return null;
+    return { decoded, config, numberOfChannels, sampleRate: decoded.sampleRate };
+  } catch (e) {
+    return null;                       // no audio track, or this browser cannot decode it
+  }
+}
+
+async function encodeAudio(muxer, audio, seconds) {
+  const { decoded, config, numberOfChannels, sampleRate } = audio;
+  let failure = null;
+  const enc = new AudioEncoder({
+    output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
+    error: e => { failure = e; },
+  });
+  enc.configure(config);
+  const planes = [];
+  for (let c = 0; c < numberOfChannels; c++) planes.push(decoded.getChannelData(c));
+  const total = Math.min(decoded.length, Math.ceil(seconds * sampleRate));
+  const BLOCK = 1024;
+  for (let off = 0; off < total && !failure; off += BLOCK) {
+    const n = Math.min(BLOCK, total - off);
+    const data = new Float32Array(n * numberOfChannels);
+    for (let c = 0; c < numberOfChannels; c++)
+      data.set(planes[c].subarray(off, off + n), c * n);
+    const ad = new AudioData({ format: "f32-planar", sampleRate, numberOfFrames: n,
+                               numberOfChannels, timestamp: Math.round(off / sampleRate * 1e6),
+                               data });
+    enc.encode(ad);
+    ad.close();
+    while (enc.encodeQueueSize > 24 && !failure) await new Promise(r => setTimeout(r, 2));
+  }
+  await enc.flush();
+  enc.close();
+  if (failure) throw failure;
+}
+
 // Stamp every frame ourselves, so the file's timing is the source's timing and
-// not however fast this machine happened to render.
-function webCodecsSink(canvas, picked, fps) {
-  const frames = [];
+// not however fast this machine happened to render. Muxing is mp4-muxer's job;
+// see vendor/mp4-muxer.LICENSE.
+function mp4Sink(canvas, picked, fps, audio) {
+  const { Muxer, ArrayBufferTarget } = window.Mp4Muxer;
+  const muxer = new Muxer({
+    target: new ArrayBufferTarget(),
+    fastStart: "in-memory",
+    video: { codec: picked.muxCodec, width: canvas.width, height: canvas.height, frameRate: fps },
+    ...(audio ? { audio: { codec: "aac", numberOfChannels: audio.numberOfChannels,
+                           sampleRate: audio.sampleRate } } : {}),
+  });
   let failure = null;
   const enc = new VideoEncoder({
-    output: chunk => {
-      const data = new Uint8Array(chunk.byteLength);
-      chunk.copyTo(data);
-      frames.push({ data, timestampUs: chunk.timestamp, key: chunk.type === "key" });
-    },
+    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
     error: e => { failure = e; },
   });
   enc.configure(picked.config);
   const gop = Math.max(1, Math.round(fps * 2));
   return {
-    label: picked.config.codec,
-    exact: true,
+    label: picked.config.codec + (audio ? " + aac" : " (no audio)"),
+    exact: true, ext: "mp4", mime: "video/mp4",
     async push(i) {
       if (failure) throw failure;
       const frame = new VideoFrame(canvas, {
@@ -941,12 +896,13 @@ function webCodecsSink(canvas, picked, fps) {
       while (enc.encodeQueueSize > 8 && !failure)   // let the encoder keep up
         await new Promise(r => setTimeout(r, 4));
     },
-    async finish() {
+    async finish(seconds) {
       await enc.flush();
       enc.close();
       if (failure) throw failure;
-      frames.sort((a, b) => a.timestampUs - b.timestampUs);
-      return buildWebM(frames, canvas.width, canvas.height, fps, picked.codecId);
+      if (audio) await encodeAudio(muxer, audio, seconds);
+      muxer.finalize();
+      return new Blob([muxer.target.buffer], { type: "video/mp4" });
     },
   };
 }
@@ -963,7 +919,7 @@ function mediaRecorderSink(canvas) {
   rec.start();
   return {
     label: "MediaRecorder",
-    exact: false,
+    exact: false, ext: "webm", mime: "video/webm",
     async push() { track.requestFrame(); },
     async finish() {
       rec.stop();
@@ -1002,9 +958,10 @@ async function renderOutput(lock, sigma, offsetDeg, cap, limit) {
   out.width = outW; out.height = outH;
   const octx = out.getContext("2d");
 
-  const picked = await pickVideoCodec(outW, outH, FPS);
-  const sink = picked ? webCodecsSink(out, picked, FPS) : mediaRecorderSink(out);
   const total = limit ? Math.min(limit, steps.length) : steps.length;
+  const picked = window.Mp4Muxer ? await pickVideoCodec(outW, outH, FPS) : null;
+  const audio = picked ? await probeAudio(sourceFile) : null;
+  const sink = picked ? mp4Sink(out, picked, FPS, audio) : mediaRecorderSink(out);
 
   const t0 = performance.now();
   for (let i = 0; i < total; i++) {
@@ -1021,8 +978,9 @@ async function renderOutput(lock, sigma, offsetDeg, cap, limit) {
     }
   }
   const wall = (performance.now()-t0)/1000;
-  const blob = await sink.finish();
-  return { blob, outW, outH, wall, frames: total, exact: sink.exact, codec: sink.label };
+  const blob = await sink.finish(total / FPS);
+  return { blob, outW, outH, wall, frames: total, exact: sink.exact,
+           codec: sink.label, ext: sink.ext, hasAudio: !!audio };
 }
 
 // ------------------------------------------------------------- wiring ----
@@ -1030,6 +988,7 @@ function supportNote() {
   const miss = [];
   if (!("captureStream" in HTMLCanvasElement.prototype)) miss.push("canvas.captureStream");
   if (typeof MediaRecorder === "undefined") miss.push("MediaRecorder");
+  if (!window.Mp4Muxer) miss.push("vendor/mp4-muxer.js (not loaded)");
   ui("support").textContent = miss.length
     ? `This browser is missing ${miss.join(" and ")}, so rendering will not work. Use Chrome, Edge or Firefox.`
     : "Decoding uses the <video> element and encoding uses MediaRecorder, so nothing is downloaded or sent anywhere.";
@@ -1037,6 +996,7 @@ function supportNote() {
 supportNote();
 
 async function loadFile(file) {
+  sourceFile = file;                   // audio is decoded from the file itself
   // Measuring happens before the marking UI exists, so its progress sits above.
   ui("markSection").before(ui("progressPanel"));
   fileName = file.name.replace(/\.[^.]+$/, "");
@@ -1092,7 +1052,7 @@ ui("render").onclick = async () => {
     const url = URL.createObjectURL(r.blob);
     ui("outVideo").src = url;
     ui("download").href = url;
-    ui("download").download = `${fileName}-stabilized.webm`;
+    ui("download").download = `${fileName}-stabilized.${r.ext}`;
     ui("outPanel").hidden = false;
     ui("progressPanel").hidden = true;
     ui("outNote").textContent =
@@ -1103,7 +1063,8 @@ ui("render").onclick = async () => {
       ui("timingWarn").textContent =
         `This browser has no WebCodecs VideoEncoder, so MediaRecorder timestamped the frames as they ` +
         `arrived: every frame is present and in order, but the duration follows render speed ` +
-        `(${(r.frames/r.wall).toFixed(1)} fps) rather than ${FPS}. Fix the timing with: ` +
+        `(${(r.frames/r.wall).toFixed(1)} fps) rather than ${FPS}, and the audio is dropped. ` +
+        `Fix the timing with: ` +
         `ffmpeg -i ${fileName}-stabilized.webm -fps_mode cfr -r ${FPS} ${fileName}-stabilized.mp4`;
     }
   } catch (e) { showError(e); }

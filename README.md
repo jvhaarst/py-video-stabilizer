@@ -97,24 +97,39 @@ two on the table. Matching the trackers exactly is open work.
 
 ## Browser output
 
-Encoded with WebCodecs `VideoEncoder` (VP9, falling back to VP8) and muxed into
-WebM here, rather than through `MediaRecorder`. That matters for timing:
-`MediaRecorder` timestamps frames as they arrive from the canvas, which is
-wall-clock time, so a render slower than real time produces a file whose
-duration is wrong. The W3C issue tracker has this as intended behaviour, and no
-flag changes it.
+The page writes MP4: video encoded with WebCodecs `VideoEncoder` (VP9, falling
+back to H.264) and audio re-encoded as AAC, muxed by
+[mp4-muxer](https://github.com/Vanilagy/mp4-muxer), vendored into `vendor/`.
 
-Setting each frame's timestamp to `frameIndex * 1e6 / fps` microseconds instead
-makes the output's timing the source's timing, however slowly it renders. A
-verification run bears this out: 90 frames rendered at 13 fps wall clock came
-back as 90 frames, `avg_frame_rate=30/1`, duration exactly 3.000000s.
+Timing is the reason for WebCodecs rather than `MediaRecorder`. `MediaRecorder`
+timestamps frames as they arrive from the canvas, which is wall-clock time, so a
+render slower than real time produces a file whose duration is wrong. The W3C
+issue tracker has this as intended behaviour and no flag changes it. Stamping
+each frame at `frameIndex * 1e6 / fps` microseconds instead makes the output's
+timing the source's timing. A verification run bears this out: 90 frames
+rendered at 14 fps wall clock came back as `avg_frame_rate=30/1`, video duration
+exactly 3.000000s.
 
 VP9 is preferred over H.264 because the expanded canvas routinely exceeds the
 macroblock limits that H.264 levels advertise.
 
-Browsers without `VideoEncoder` fall back to `MediaRecorder`. Every frame is
-still present and in order, but the duration follows render speed, and the page
-says so and prints the `ffmpeg` command that fixes it.
+Two things to know about the audio. It is **re-encoded, not copied**: the
+`<video>` element hands this page pixels and never the original encoded audio
+packets, so passthrough is not reachable from this design. And because AAC
+frames hold 1024 samples, the audio track ends up to ~20ms longer than the video
+track, rounded up to a whole frame.
+
+Browsers without `VideoEncoder` fall back to `MediaRecorder`, which produces
+WebM with no audio and wall-clock timing. The page says so and prints the
+`ffmpeg` command that fixes the timing.
+
+### Vendored dependencies
+
+`vendor/` holds a byte-identical copy of the build that `package.json` pins, so
+the page needs no bundler, no CDN and no network. `tools/sync-vendor.mjs`
+refreshes it and `--check` fails the build when the two drift, which is what
+makes a Renovate version bump actually reach the page instead of sitting unused
+in `node_modules`.
 
 ## Development
 
@@ -122,6 +137,7 @@ says so and prints the `ffmpeg` command that fixes it.
 uv venv && uv pip install -e .
 python tests/make_fixture.py     # regenerate the conformance fixture
 node tests/conformance.mjs       # assert the browser port still matches
+npm ci && node tools/sync-vendor.mjs --check   # assert vendor/ matches package.json
 ```
 
 The fixture is synthetic and deterministic, so the test needs no video file.

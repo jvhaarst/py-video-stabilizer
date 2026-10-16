@@ -1,0 +1,26 @@
+{
+  "name": "py-video-stabilizer",
+  "version": "1.0.0",
+  "description": "Vendored browser dependencies for the stabilizer page",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "sync-vendor": "node tools/sync-vendor.mjs",
+    "check-vendor": "node tools/sync-vendor.mjs --check",
+    "conformance": "node tests/conformance.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jvhaarst/py-video-stabilizer.git"
+  },
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/jvhaarst/py-video-stabilizer/issues"
+  },
+  "homepage": "https://github.com/jvhaarst/py-video-stabilizer#readme",
+  "dependencies": {
+    "mp4-muxer": "5.2.2"
+  },
+  "private": true
+}
