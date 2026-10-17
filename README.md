@@ -22,6 +22,11 @@ and the video never leaves your machine. No build step, no CDN and no network at
 runtime — `index.html` plus the vendored muxer in `vendor/`, which also works
 offline from `file://`.
 
+Tracking runs through OpenCV compiled to WebAssembly, 3.34 MB, about 0.85 MB
+over the wire once compressed. It is the slow part: measuring a 204-frame clip
+takes around 145 seconds in the browser against a few seconds on the command
+line, because direct frame alignment runs per frame.
+
 Decoding uses the `<video>` element and a canvas, which every browser has. For
 MP4 with audio and correct timing it also needs WebCodecs (`VideoEncoder` and
 `AudioEncoder`): Chrome and Edge 94+, Firefox 130+ on desktop, Safari 16.4+.
@@ -188,20 +193,20 @@ port reproduces `stabilize.py` within 1e-9 on angles and scales, 1e-7 on
 translations and 1e-6 on canvas pixels; it currently matches to 1e-12 or better
 on all of them.
 
-The **trackers** do not match exactly. On the test clip:
+The **trackers** now agree too, because both call OpenCV. Measured frame by
+frame on identical frames:
 
-| | `stabilize.py` | `index.html` |
+| | hand-written JS | OpenCV.js |
 | --- | --- | --- |
-| roll peak-to-peak | 81.6° | 85.2° |
-| roll min / max | -23.1° / 58.6° | -24.2° / 61.0° |
+| rotation correlation, handheld | 0.206 | **0.988** |
+| translation correlation, handheld | 0.28 / 0.13 | **0.989 / 0.999** |
+| rotation correlation, aerial | 0.993 | **1.000** |
 
-About 4% apart on that clip, from different Lucas-Kanade window sizes and
-iteration counts. On footage where rotation is hard to measure at all they
-diverge much further: on the handheld dog clip `stabilize.py` accumulated 116°
-of roll and `index.html` 167°, neither of which is in the video. Each
-implementation is self-consistent, so a roll offset measured in the browser
-applies to the browser; carrying one between the two leaves a degree or more on
-the table. Matching the trackers exactly is open work.
+End to end on the handheld clip the page reports 36.9 degrees of accumulated
+roll against the command line's 36.7.
+
+Residual differences come from RANSAC's randomness, not from different
+algorithms.
 
 ## Browser output
 
@@ -247,8 +252,14 @@ duration would need a demuxer, which this page deliberately does not have.
 
 ### Vendored dependencies
 
-`vendor/` holds a byte-identical copy of the build that `package.json` pins, so
-the page needs no bundler, no CDN and no network. `tools/sync-vendor.mjs`
+`vendor/` holds `mp4-muxer`, a byte-identical copy of the build that
+`package.json` pins, and `opencv.js`, which is **built from source** rather than
+taken from a registry: `estimateAffinePartial2D` is missing from the upstream
+JavaScript whitelist (opencv/opencv#20538, open since 2021) and the stock build
+is 10.9 MB against 3.34 MB for one holding only the eleven functions this page
+calls. `tools/build-opencv-js.sh` and `tools/opencv_js.config.py` reproduce it,
+`vendor/opencv.js.provenance` records the commit, toolchain and hash, and the
+vendor check verifies that hash. Neither needs a bundler, a CDN or a network. `tools/sync-vendor.mjs`
 refreshes it and `--check` fails the build when the two drift, which is what
 makes a Renovate version bump actually reach the page instead of sitting unused
 in `node_modules`.

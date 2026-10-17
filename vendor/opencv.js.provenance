@@ -1,0 +1,13 @@
+opencv.js built from source, not from a package registry.
+
+  opencv commit   9b6287ec500ef7b327ac74c4f6c9cd84a2cbc9cd
+  opencv describe 4.x
+  emscripten      3.1.74
+  config          tools/opencv_js.config.py
+  build script    tools/build-opencv-js.sh
+  sha256          ae9b2534aa8454a7755fb153d0209599a89f906eef954bf5f18f12591aa0fd99
+  size             3505831 bytes
+
+Built rather than taken from npm because estimateAffinePartial2D is absent from
+the upstream JavaScript whitelist (opencv/opencv#20538, open since 2021) and the
+stock build is 10.9 MB against 3.34 MB here.

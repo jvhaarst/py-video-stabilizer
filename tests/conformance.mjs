@@ -17,7 +17,7 @@ const slice = (from, to) => {
   return html.slice(i, j);
 };
 const source =
-  slice('const rad = d =>', '// ------------------------------------------------------ feature tracking ----') +
+  slice('const rad = d =>', '// ------------------------------------------------- tracking (OpenCV.js) ----') +
   slice('function localAveragePose(', 'async function renderOutput(');
 
 const g = globalThis;
