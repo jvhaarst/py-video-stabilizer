@@ -18,11 +18,14 @@ Two ways to run it, one algorithm.
 
 Drop in a video, mark the horizon on a few frames, get a stabilized file back.
 Nothing is uploaded: decoding, tracking and encoding all happen in your browser,
-and the video never leaves your machine. No dependencies, no build step — the
-page is one HTML file that also works offline from `file://`.
+and the video never leaves your machine. No build step, no CDN and no network at
+runtime — `index.html` plus the vendored muxer in `vendor/`, which also works
+offline from `file://`.
 
-Needs a current Chrome, Edge or Firefox for `canvas.captureStream` and
-`MediaRecorder`.
+Decoding uses the `<video>` element and a canvas, which every browser has. For
+MP4 with audio and correct timing it also needs WebCodecs (`VideoEncoder` and
+`AudioEncoder`): Chrome and Edge 94+, Firefox 130+ on desktop, Safari 16.4+.
+Without WebCodecs the page falls back to `MediaRecorder` and says so.
 
 ## On the command line
 
@@ -80,8 +83,10 @@ horizon. That is the size of the angle being measured.
 
 ## Known differences between the two implementations
 
-The camera-path maths is identical — `tests/conformance.mjs` asserts the browser
-port reproduces `stabilize.py` to within 1e-9, and it currently matches to 1e-12.
+The camera-path maths is identical. `tests/conformance.mjs` asserts the browser
+port reproduces `stabilize.py` within 1e-9 on angles and scales, 1e-7 on
+translations and 1e-6 on canvas pixels; it currently matches to 1e-12 or better
+on all of them.
 
 The **trackers** do not match exactly. On the test clip:
 
@@ -115,9 +120,11 @@ macroblock limits that H.264 levels advertise.
 
 Two things to know about the audio. It is **re-encoded, not copied**: the
 `<video>` element hands this page pixels and never the original encoded audio
-packets, so passthrough is not reachable from this design. And because AAC
-frames hold 1024 samples, the audio track ends up to ~20ms longer than the video
-track, rounded up to a whole frame.
+packets, so passthrough is not reachable from this design. And the audio track
+runs slightly longer than the video track, because AAC is framed in blocks of
+1024 samples and the encoder adds its own priming: 59ms on the full test clip
+and 72ms on a 3-second one. Players follow the container duration, so this is
+cosmetic.
 
 Browsers without `VideoEncoder` fall back to `MediaRecorder`, which produces
 WebM with no audio and wall-clock timing. The page says so and prints the
@@ -147,13 +154,24 @@ in `node_modules`.
 
 ```bash
 uv venv && uv pip install -e .
-python tests/make_fixture.py     # regenerate the conformance fixture
-node tests/conformance.mjs       # assert the browser port still matches
-npm ci && node tools/sync-vendor.mjs --check   # assert vendor/ matches package.json
+npm ci
+
+.venv/bin/python tests/check_fixture.py      # stabilize.py still matches the fixture
+node tests/conformance.mjs                   # the browser port still matches stabilize.py
+node tools/sync-vendor.mjs --check           # vendor/ still matches package.json
 ```
 
-The fixture is synthetic and deterministic, so the test needs no video file.
+These are the three checks CI runs. The fixture is synthetic and deterministic,
+so none of them needs a video file. To change the algorithm deliberately,
+regenerate the fixture with `.venv/bin/python tests/make_fixture.py` and commit
+the result.
+
+Serving the page over HTTP is not required — opening `index.html` directly
+works — but `python3 -m http.server` is handy for testing.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
+
+`vendor/mp4-muxer.js` is mp4-muxer by Vanilagy, also MIT; its licence travels
+with it in `vendor/mp4-muxer.LICENSE`.

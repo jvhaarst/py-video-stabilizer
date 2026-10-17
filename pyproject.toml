@@ -5,6 +5,7 @@ description = "Stabilize shaky video by smoothing the camera path locally, with 
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+license-files = ["LICENSE"]
 dependencies = ["numpy>=1.26", "opencv-python>=4.9"]
 
 [project.scripts]
