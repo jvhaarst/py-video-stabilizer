@@ -14,3 +14,7 @@ __pycache__/
 .claude/
 
 node_modules/
+
+# Saved web pages dropped here for reference.
+*.html.gz
+[[]Question[]]*.html
