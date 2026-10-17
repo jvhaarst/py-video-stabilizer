@@ -310,8 +310,10 @@ def main():
                     help="grow the canvas to the bounding box instead, keeping native scale")
     ap.add_argument("--max-canvas", type=int, default=3840,
                     help="longest side an --expand canvas may reach before it scales down")
-    ap.add_argument("--lock", type=float, default=1.0,
-                    help="rotation lock: 0 only smooths roll, 1 holds frame-0 orientation")
+    ap.add_argument("--lock", type=float, default=0.0,
+                    help="rotation lock: 0 only smooths roll, 1 holds frame-0 orientation. "
+                         "1 needs a horizon reference and a scene the tracker can measure "
+                         "rotation in reliably; see --roll-offset")
     ap.add_argument("--roll-offset", type=float, default=0.0,
                     help="degrees of fixed roll to add, to level a tilted first frame")
     ap.add_argument("--level-average", action="store_true",
@@ -322,8 +324,10 @@ def main():
                     help="leave a static end card unrotated and centred")
     ap.add_argument("--end-ramp", type=float, default=0.6,
                     help="seconds over which to ease into a straightened end card")
-    ap.add_argument("--smooth", type=float, default=20.0,
-                    help="Gaussian sigma in frames for the local path average")
+    ap.add_argument("--smooth", type=float, default=10.0,
+                    help="Gaussian sigma in frames for the local path average. Larger means "
+                         "steadier but a bigger canvas and larger corrections; 20-30 suits "
+                         "aerial footage, 5-10 suits handheld")
     ap.add_argument("--max-shift", type=float, default=0.35,
                     help="cap on translation correction, as a fraction of frame size")
     ap.add_argument("--track-width", type=int, default=960,
@@ -373,6 +377,16 @@ def main():
             offset_deg = np.degrees(level) + args.roll_offset
             print(f"  horizon from {used} frame(s): roll offset {np.degrees(level):+.1f} deg "
                   f"(scatter {spread:.1f} deg, agreement {agreement:.2f})", file=sys.stderr)
+
+    # Whether a large net roll is real or tracker drift cannot be decided from the
+    # numbers alone, so state it and let the operator judge against the footage.
+    net = abs(np.degrees(roll[-1] - roll[0]))
+    if args.lock > 0 and net > 25:
+        print(f"  note: roll ends {net:.0f} deg from where it started, and --lock "
+              f"{args.lock:g} will hold the frame at that first orientation throughout.\n"
+              f"  That is right only if the camera really turned that far. Parallax and large\n"
+              f"  moving subjects bias the tracker the same way; --lock 0 is immune to it.",
+              file=sys.stderr)
 
     lo, hi = segment_bounds(cuts, n)
     radius = max(1, int(3 * args.smooth))

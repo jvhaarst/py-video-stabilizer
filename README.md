@@ -31,7 +31,14 @@ Without WebCodecs the page falls back to `MediaRecorder` and says so.
 
 ```bash
 uvx --from git+https://github.com/jvhaarst/py-video-stabilizer stabilize \
-  input.mp4 output.mp4 --expand --lock 1.0 --straighten-end --roll-offset -4.7
+  input.mp4 output.mp4 --expand
+```
+
+That is the right starting point for ordinary footage. Add the horizon lock only
+when you have measured an offset and the camera really does roll:
+
+```bash
+... --expand --lock 1.0 --straighten-end --roll-offset -5.1
 ```
 
 Faster than the browser, and the output is whatever your ffmpeg build encodes.
@@ -53,6 +60,49 @@ Faster than the browser, and the output is whatever your ffmpeg build encodes.
 - **Lands the end card square.** A static end card is detected and the
   correction eases off onto it with a quintic minimum-jerk blend, which keeps
   the incoming motion's velocity and arrives at rest.
+
+## Where it does badly
+
+The motion model is a similarity transform: translation, rotation and uniform
+scale, four degrees of freedom. That fits aerial footage well, because the scene
+is far away, effectively planar, and nothing in it moves on its own. Two common
+situations break it.
+
+**Parallax.** Walking with a camera makes near things move much faster than far
+things. No single similarity transform fits both, so the least-squares fit
+absorbs the mismatch as rotation and scale. The error is small per frame and
+always in the same direction, so it accumulates.
+
+**Large moving subjects.** RANSAC keeps the biggest consistent set of points. If
+a subject fills enough of the frame and is well textured, that set can be the
+subject rather than the scene.
+
+Measured on a 6.8-second handheld clip of a dog walking ahead of the camera: the
+tracker reported 112 degrees of accumulated roll where the footage barely
+rotates at all. Taking features only from the distant upper part of the frame
+roughly halved it, to 66 degrees, which is what identifies parallax and the
+subject as the cause:
+
+| features taken from | accumulated roll |
+| --- | --- |
+| the whole frame | 112° |
+| the top 40% only | 66° |
+| the bottom 40% only, holding the subject and the nearest ground | 131° |
+
+What to do about it:
+
+- **Leave `--lock` at 0**, which is the default. Local smoothing only ever
+  compares a frame with its neighbours, so slow drift cancels instead of
+  accumulating. `--lock 1.0` applies the accumulated figure as a correction, so
+  on drifting footage it rotates the picture right over.
+- **Keep `--smooth` small for handheld**, 5 to 10. Each step up widens the
+  window, which enlarges the corrections, the canvas and the amount of clamping:
+  on that clip `--smooth 40` clamped 129 of 204 frames.
+- **Exclude a region** with `--mask-top` and `--mask-bottom` when a subject or
+  very near ground dominates one part of the frame.
+
+Fixing the drift itself rather than working around it needs a motion model that
+can represent a 3D scene. That is open work.
 
 ## Finding the horizon
 
