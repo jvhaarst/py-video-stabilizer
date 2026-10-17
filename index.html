@@ -113,6 +113,7 @@
   </div>
 
   <div id="markSection" hidden>
+    <p class="warn" id="profile" hidden></p>
     <div class="stage">
       <canvas id="stage" width="768" height="432"></canvas>
       <div class="bar">
@@ -341,7 +342,9 @@ function ransacSimilarity(src, dst, thresh = 3, trials = 180) {
     if (bestCount > n*0.85) break;
   }
   if (!bestIn || bestCount < 6) return null;
-  return fitSimilarity(src, dst, bestIn);           // refit on all inliers
+  const m = fitSimilarity(src, dst, bestIn);        // refit on all inliers
+  if (m) m.inlierRatio = bestCount / n;
+  return m;
 }
 
 // ------------------------------------------------------------- video io ----
@@ -407,6 +410,7 @@ async function measurePath(trackWidth, maskTop = 0.14, maskBottom = 0.12) {
   steps = [I3()];
   let lost = 0, dupes = 0;
   let prevStep = I3();                   // motion guess carried frame to frame
+  const diag = { inlier: [], split: [], trans: [] };
   for (let i = 1; i < nFrames; i++) {
     await seekTo((i + 0.5)/FPS);
     const cur = pyramid(grabGray(tw, th), tw, th, 5);
@@ -434,6 +438,24 @@ async function measurePath(trackWidth, maskTop = 0.14, maskBottom = 0.12) {
       if (src.length >= 10) {
         const m = ransacSimilarity(src, dst);
         if (m) {
+          diag.inlier.push(m.inlierRatio || 0);
+          diag.trans.push(Math.hypot(m[2], m[5]) / down / srcW);
+          // Fit the halves of the frame separately. On a far, planar scene they
+          // agree; under parallax or an independently moving subject they do
+          // not, which is when rotation stops being trustworthy.
+          if (steps.length % 3 === 0) {
+            const up = [], upD = [], dn = [], dnD = [];
+            for (let k = 0; k < src.length; k++) {
+              const hi = src[k][1] < th/2;
+              (hi ? up : dn).push(src[k]);
+              (hi ? upD : dnD).push(dst[k]);
+            }
+            if (up.length >= 12 && dn.length >= 12) {
+              const a = ransacSimilarity(up, upD), b = ransacSimilarity(dn, dnD);
+              if (a && b) diag.split.push(Math.abs(
+                deg(Math.atan2(a[3], a[0])) - deg(Math.atan2(b[3], b[0]))));
+            }
+          }
           prevStep = m.slice();          // keep it in tracking coordinates
           m[2] /= down; m[5] /= down;    // report translation at full scale
           step = m; failed = false;
@@ -458,7 +480,24 @@ async function measurePath(trackWidth, maskTop = 0.14, maskBottom = 0.12) {
   for (let i = 1; i < steps.length; i++)
     cumulative.push(mul(mul(toC, mul(steps[i], fromC)), cumulative[i-1]));
   rollDeg = unwrap(cumulative.map(m => decompose(m).angle)).map(deg);
-  return { lost, dupes, cuts: cuts.length };
+  return { lost, dupes, cuts: cuts.length, diag };
+}
+
+// Read the footage type off the tracking diagnostics. Mirrors classify() in
+// stabilize.py: whether the halves of the frame agree on rotation says whether
+// rotation can be trusted at all, and how far the picture travels per frame
+// says how wide the smoothing window can be.
+function classify(diag) {
+  const med = a => { if (!a.length) return null;
+                     const s = [...a].sort((x, y) => x - y); return s[s.length >> 1]; };
+  const inlier = med(diag.inlier) ?? 0, split = med(diag.split) ?? 99,
+        travel = med(diag.trans) ?? 0;
+  const trustRotation = inlier >= 0.5 && split <= 0.5;
+  const smooth = Math.min(25, Math.max(5, Math.round(0.6 / Math.max(travel, 1e-4))));
+  return { smooth, trustRotation,
+           evidence: `inlier ratio ${inlier.toFixed(2)}, frame halves disagree on rotation ` +
+                     `by ${split.toFixed(2)}\u00b0, picture travels ` +
+                     `${(travel*100).toFixed(1)}% of its width per frame` };
 }
 
 // --------------------------------------------------- candidate frames ----
@@ -1019,6 +1058,18 @@ async function loadFile(file) {
   await grabCandidates(idx);
   marks = candidates.map(() => null);
   current = 0;
+  const profile = classify(info.diag);
+  ui("smooth").value = profile.smooth;
+  ui("lock").value = 0;
+  ui("profile").hidden = false;
+  ui("profile").innerHTML =
+    `Measured from your clip: ${profile.evidence}. ` +
+    `Smoothing set to <strong>${profile.smooth}</strong>. ` +
+    (profile.trustRotation
+      ? "Rotation measures consistently here, so the lock is usable once you have marked a horizon."
+      : "The halves of the frame disagree about rotation, so it cannot be measured reliably here; " +
+        "leave the lock at 0, because what it would hold is mostly drift.");
+
   ui("progressPanel").hidden = true;
   ui("markSection").hidden = false;
   drawMark();

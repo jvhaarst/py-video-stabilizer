@@ -77,6 +77,7 @@ def estimate_steps(path, track_width, mask_top, mask_bottom):
     steps = [np.eye(3)]
     cuts = []
     lost = 0
+    diag = {"inlier": [], "split": [], "trans": []}
 
     feature_args = dict(maxCorners=800, qualityLevel=0.01, minDistance=10, blockSize=7)
     lk_args = dict(
@@ -103,10 +104,30 @@ def estimate_steps(path, track_width, mask_top, mask_bottom):
                 & (np.linalg.norm(p0 - p0r, axis=2).ravel() < 1.0)
             )
             if good.sum() >= 10:
-                m, _ = cv2.estimateAffinePartial2D(
+                m, inl = cv2.estimateAffinePartial2D(
                     p0[good], p1[good], method=cv2.RANSAC, ransacReprojThreshold=3.0
                 )
                 if m is not None:
+                    diag["inlier"].append(float(inl.ravel().mean()) if inl is not None else 0.0)
+                    diag["trans"].append(float(np.hypot(m[0, 2], m[1, 2]) / down / w))
+                    # Fit the halves of the frame separately. On a far, planar
+                    # scene they agree; under parallax or an independently moving
+                    # subject they do not, which is exactly when the rotation
+                    # estimate stops being trustworthy. Sampled, since it costs
+                    # two more fits.
+                    if len(steps) % 3 == 0:
+                        sp = p0[good].reshape(-1, 2)
+                        dp = p1[good].reshape(-1, 2)
+                        up = sp[:, 1] < prev_gray.shape[0] / 2
+                        if up.sum() >= 12 and (~up).sum() >= 12:
+                            mt, _ = cv2.estimateAffinePartial2D(
+                                sp[up], dp[up], method=cv2.RANSAC, ransacReprojThreshold=3.0)
+                            mb, _ = cv2.estimateAffinePartial2D(
+                                sp[~up], dp[~up], method=cv2.RANSAC, ransacReprojThreshold=3.0)
+                            if mt is not None and mb is not None:
+                                diag["split"].append(abs(np.degrees(
+                                    np.arctan2(mt[1, 0], mt[0, 0])
+                                    - np.arctan2(mb[1, 0], mb[0, 0]))))
                     m[0, 2] /= down  # translation was measured downscaled
                     m[1, 2] /= down
                     step, failed = np.vstack([m, [0.0, 0.0, 1.0]]), False
@@ -129,7 +150,33 @@ def estimate_steps(path, track_width, mask_top, mask_bottom):
         print(f"  no usable motion on {lost} frame(s)", file=sys.stderr)
     if cuts:
         print(f"  {len(cuts)} shot change(s) at frame(s) {cuts[:8]}", file=sys.stderr)
-    return steps, cuts, (w, h), fps
+    return steps, cuts, (w, h), fps, diag
+
+
+def classify(diag):
+    """Read the settings off the tracking diagnostics.
+
+    Two measurements decide them. Whether the halves of the frame agree on
+    rotation, together with how much of the scene the model explains, says
+    whether rotation can be trusted at all. How far the picture travels per
+    frame sets the smoothing window, through a continuous mapping rather than
+    bands, because the two implementations measure travel slightly differently
+    and a threshold would make a small difference flip the result.
+    """
+    inlier = float(np.median(diag["inlier"])) if diag["inlier"] else 0.0
+    split = float(np.median(diag["split"])) if diag["split"] else 99.0
+    travel = float(np.median(diag["trans"])) if diag["trans"] else 0.0
+
+    trust_rotation = inlier >= 0.5 and split <= 0.5
+    smooth = float(np.clip(round(0.6 / max(travel, 1e-4)), 5, 25))
+
+    return {
+        "smooth": smooth,
+        "trust_rotation": trust_rotation,
+        "evidence": (f"inlier ratio {inlier:.2f}, frame halves disagree on rotation by "
+                     f"{split:.2f} deg, picture travels {travel * 100:.1f}% of its width "
+                     f"per frame"),
+    }
 
 
 def segment_bounds(cuts, n):
@@ -310,7 +357,7 @@ def main():
                     help="grow the canvas to the bounding box instead, keeping native scale")
     ap.add_argument("--max-canvas", type=int, default=3840,
                     help="longest side an --expand canvas may reach before it scales down")
-    ap.add_argument("--lock", type=float, default=0.0,
+    ap.add_argument("--lock", type=float, default=None,
                     help="rotation lock: 0 only smooths roll, 1 holds frame-0 orientation. "
                          "1 needs a horizon reference and a scene the tracker can measure "
                          "rotation in reliably; see --roll-offset")
@@ -324,10 +371,11 @@ def main():
                     help="leave a static end card unrotated and centred")
     ap.add_argument("--end-ramp", type=float, default=0.6,
                     help="seconds over which to ease into a straightened end card")
-    ap.add_argument("--smooth", type=float, default=10.0,
+    ap.add_argument("--smooth", type=float, default=None,
                     help="Gaussian sigma in frames for the local path average. Larger means "
                          "steadier but a bigger canvas and larger corrections; 20-30 suits "
-                         "aerial footage, 5-10 suits handheld")
+                         "aerial footage, 5-10 suits handheld. Measured from the "
+                         "footage when not given")
     ap.add_argument("--max-shift", type=float, default=0.35,
                     help="cap on translation correction, as a fraction of frame size")
     ap.add_argument("--track-width", type=int, default=960,
@@ -340,11 +388,24 @@ def main():
     args = ap.parse_args()
 
     print("pass 1: measuring camera path", file=sys.stderr)
-    steps, cuts, (w, h), fps = estimate_steps(
+    steps, cuts, (w, h), fps, diag = estimate_steps(
         args.input, args.track_width, args.mask_top, args.mask_bottom
     )
+    profile = classify(diag)
+    smooth = args.smooth if args.smooth is not None else profile["smooth"]
+    lock = args.lock if args.lock is not None else 0.0
     n = len(steps)
     print(f"  {n} frames, {w}x{h} @ {fps:.3f} fps", file=sys.stderr)
+    print(f"  measured: {profile['evidence']}", file=sys.stderr)
+    chose = [] if args.smooth is not None else ["--smooth %g" % smooth]
+    print(f"  using --smooth {smooth:g} --lock {lock:g}"
+          + (f"  ({', '.join(chose)} measured from the footage)" if chose else ""),
+          file=sys.stderr)
+    if lock > 0 and not profile["trust_rotation"]:
+        print("  note: the halves of the frame disagree about rotation, so rotation cannot be\n"
+              "  measured reliably here and the figure --lock holds will be mostly drift.\n"
+              "  Parallax and large moving subjects do this; --lock 0 is immune to it.",
+              file=sys.stderr)
 
     # Work around the frame centre, not the origin: under large rolls the
     # origin's path says nothing useful about where the picture actually went.
@@ -381,15 +442,15 @@ def main():
     # Whether a large net roll is real or tracker drift cannot be decided from the
     # numbers alone, so state it and let the operator judge against the footage.
     net = abs(np.degrees(roll[-1] - roll[0]))
-    if args.lock > 0 and net > 25:
+    if lock > 0 and net > 25:
         print(f"  note: roll ends {net:.0f} deg from where it started, and --lock "
-              f"{args.lock:g} will hold the frame at that first orientation throughout.\n"
+              f"{lock:g} will hold the frame at that first orientation throughout.\n"
               f"  That is right only if the camera really turned that far. Parallax and large\n"
               f"  moving subjects bias the tracker the same way; --lock 0 is immune to it.",
               file=sys.stderr)
 
     lo, hi = segment_bounds(cuts, n)
-    radius = max(1, int(3 * args.smooth))
+    radius = max(1, int(3 * smooth))
     offset = np.radians(offset_deg)
     cap_px = args.max_shift * min(w, h)
 
@@ -397,11 +458,11 @@ def main():
     clamped = 0
     for i in range(n):
         j0, j1 = max(lo[i], i - radius), min(hi[i], i + radius)
-        mean_angle, mean_scale, tx, ty = local_average_pose(cumulative, i, j0, j1, args.smooth)
+        mean_angle, mean_scale, tx, ty = local_average_pose(cumulative, i, j0, j1, smooth)
 
         # Rotation is the one component worth correcting absolutely: holding
         # frame-0's orientation costs only black corners, not framing.
-        angle = (1.0 - args.lock) * mean_angle + args.lock * (offset - roll[i])
+        angle = (1.0 - lock) * mean_angle + lock * (offset - roll[i])
 
         shift = np.hypot(tx, ty)
         if shift > cap_px:

@@ -61,6 +61,39 @@ Faster than the browser, and the output is whatever your ffmpeg build encodes.
   correction eases off onto it with a quintic minimum-jerk blend, which keeps
   the incoming motion's velocity and arrives at rest.
 
+## Settings chosen from the footage
+
+Both implementations measure the clip during the tracking pass and set the
+smoothing window from what they find. Anything you pass explicitly wins; the
+automatic value only fills in what you left out, and the chosen figure is
+printed so nothing is decided silently.
+
+Two measurements do the work:
+
+- **Can rotation be trusted?** The model is fitted separately to the top and
+  bottom halves of the frame. On a far, planar scene the halves agree. Under
+  parallax, or with a subject moving independently, they do not, and that is
+  exactly when the rotation estimate stops meaning anything. Combined with the
+  share of points the fit explains, this decides whether the rotation lock is
+  usable at all.
+- **How far does the picture travel per frame?** This sets the smoothing
+  window, as `0.6 / travel` clamped to 5–25. A continuous mapping rather than
+  bands, because the two implementations measure travel slightly differently
+  and a threshold would let a small difference flip the result.
+
+Measured on three clips:
+
+| clip | inliers | halves disagree | travel/frame | smoothing |
+| --- | --- | --- | --- | --- |
+| FPV drone | 0.91 | 0.00° | 0.4% | 25 |
+| handheld, walking | 0.23 | 1.06° | 6.0% | 10 |
+| timelapse | 0.73 | 0.36° | 9.8% | 6 |
+
+**Automatic selection never switches the rotation lock on.** It can only report
+that rotation is untrustworthy, and warn if you asked for a lock anyway. Turning
+the lock on needs a horizon offset, which is a judgement about the footage, not
+something to guess.
+
 ## Where it does badly
 
 The motion model is a similarity transform: translation, rotation and uniform
@@ -145,10 +178,13 @@ The **trackers** do not match exactly. On the test clip:
 | roll peak-to-peak | 81.6° | 85.2° |
 | roll min / max | -23.1° / 58.6° | -24.2° / 61.0° |
 
-About 4% apart, from different Lucas-Kanade window sizes and iteration counts.
-Each implementation is self-consistent, so a roll offset measured in the browser
-applies to the browser; carrying an offset between the two leaves a degree or
-two on the table. Matching the trackers exactly is open work.
+About 4% apart on that clip, from different Lucas-Kanade window sizes and
+iteration counts. On footage where rotation is hard to measure at all they
+diverge much further: on the handheld dog clip `stabilize.py` accumulated 116°
+of roll and `index.html` 167°, neither of which is in the video. Each
+implementation is self-consistent, so a roll offset measured in the browser
+applies to the browser; carrying one between the two leaves a degree or more on
+the table. Matching the trackers exactly is open work.
 
 ## Browser output
 
