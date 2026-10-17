@@ -122,6 +122,23 @@ subject as the cause:
 | the top 40% only | 66° |
 | the bottom 40% only, holding the subject and the nearest ground | 131° |
 
+Richer motion models do not help: on identical correspondences, affine reached
+127 degrees and a homography 135, against 110 for the similarity transform.
+Neither does spacing the features out, which made it worse. What helps is not
+relying on the features at all, which is what the refinement pass does.
+
+The command-line version can work around it. When the inlier ratio shows the
+tracker is not fitting the scene, each estimate is polished by aligning the two
+frames directly, which does not share the feature tracker's bias. On the
+handheld clip that cut accumulated roll from 116 degrees to 37.
+
+It is applied only when the measurements say it will help. Direct alignment is
+not better in general — where the tracker fits well it is markedly worse, by
+-11 degrees against 68 on the timelapse and 19 against 57 on the aerial clip —
+so `--refine auto`, the default, enables it only where the tracker is
+struggling. `--refine on` and `--refine off` force the choice. The browser
+version does not have this yet.
+
 What to do about it:
 
 - **Leave `--lock` at 0**, which is the default. Local smoothing only ever

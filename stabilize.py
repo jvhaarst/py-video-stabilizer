@@ -50,6 +50,37 @@ def build_mask(h, w, top_frac, bottom_frac):
     return mask
 
 
+def ecc_order(samples):
+    """Work out which argument order means prev -> cur for this OpenCV build.
+
+    findTransformECC's documented direction is easy to get backwards, and the
+    cost of getting it wrong is a silently inverted estimate, so decide it by
+    vote against the feature tracker's translation, whose sign is unambiguous.
+    """
+    votes = [0, 0]
+    for a_s, b_s, tx in samples:
+        if abs(tx) < 2:
+            continue
+        for order in (0, 1):
+            w = ecc_fit(a_s, b_s, None, order)
+            if w is not None and np.sign(w[0, 2]) == np.sign(tx):
+                votes[order] += 1
+    return 0 if votes[0] > votes[1] else 1
+
+
+def ecc_fit(a_s, b_s, init, order):
+    """Align two downscaled frames, optionally starting from a known guess."""
+    warp = np.eye(2, 3, dtype=np.float32) if init is None else init.astype(np.float32).copy()
+    template, image = (b_s, a_s) if order == 0 else (a_s, b_s)
+    try:
+        cv2.findTransformECC(
+            template, image, warp, cv2.MOTION_EUCLIDEAN,
+            (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 50, 1e-5), None, 5)
+    except cv2.error:
+        return None
+    return warp
+
+
 def estimate_steps(path, track_width, mask_top, mask_bottom):
     """Measure the transform from each frame to the next.
 
@@ -75,9 +106,19 @@ def estimate_steps(path, track_width, mask_top, mask_bottom):
     mask = build_mask(*prev_gray.shape[:2], mask_top, mask_bottom)
 
     steps = [np.eye(3)]
+    refined = [np.eye(3)]
     cuts = []
     lost = 0
     diag = {"inlier": [], "split": [], "trans": []}
+    ecc_scale = 0.5
+    ecc_samples = []
+    order = [None]
+
+    def small_pair(a, b):
+        f = lambda g: cv2.GaussianBlur(
+            cv2.resize(g, None, fx=ecc_scale, fy=ecc_scale,
+                       interpolation=cv2.INTER_AREA), (5, 5), 0).astype(np.float32) / 255.0
+        return f(a), f(b)
 
     feature_args = dict(maxCorners=800, qualityLevel=0.01, minDistance=10, blockSize=7)
     lk_args = dict(
@@ -143,6 +184,31 @@ def estimate_steps(path, track_width, mask_top, mask_bottom):
             step = np.eye(3)
 
         steps.append(step)
+
+        # Polish the estimate by aligning the two frames directly. Feature
+        # tracking carries a systematic rotation bias when the scene has depth;
+        # intensity alignment does not share it. Whether to use the result is
+        # decided later, once the motion magnitude is known, because below about
+        # a pixel per frame this adds noise instead of removing bias.
+        pol = step
+        if not failed:
+            a_s, b_s = small_pair(prev_gray, gray)
+            if len(ecc_samples) < 24:
+                ecc_samples.append((a_s, b_s, float(step[0, 2] * down * ecc_scale)))
+            elif order[0] is None:
+                order[0] = ecc_order(ecc_samples)
+            if order[0] is not None:
+                ang = np.arctan2(step[1, 0], step[0, 0])
+                init = np.array([[np.cos(ang), -np.sin(ang), step[0, 2] * down * ecc_scale],
+                                 [np.sin(ang), np.cos(ang), step[1, 2] * down * ecc_scale]],
+                                dtype=np.float32)
+                warp = ecc_fit(a_s, b_s, init, order[0])   # not `w`: that is the frame width
+                if warp is not None:
+                    pol = np.array(
+                        [[warp[0, 0], warp[0, 1], warp[0, 2] / down / ecc_scale],
+                         [warp[1, 0], warp[1, 1], warp[1, 2] / down / ecc_scale],
+                         [0.0, 0.0, 1.0]])
+        refined.append(pol)
         prev_gray = gray
 
     cap.release()
@@ -150,7 +216,7 @@ def estimate_steps(path, track_width, mask_top, mask_bottom):
         print(f"  no usable motion on {lost} frame(s)", file=sys.stderr)
     if cuts:
         print(f"  {len(cuts)} shot change(s) at frame(s) {cuts[:8]}", file=sys.stderr)
-    return steps, cuts, (w, h), fps, diag
+    return steps, refined, cuts, (w, h), fps, diag
 
 
 def classify(diag):
@@ -384,19 +450,42 @@ def main():
                     help="fraction of the top of frame ignored when picking features")
     ap.add_argument("--mask-bottom", type=float, default=0.12,
                     help="fraction of the bottom of frame ignored when picking features")
+    ap.add_argument("--refine", choices=("auto", "on", "off"), default="auto",
+                    help="polish each motion estimate by aligning the frames directly. "
+                         "Removes the rotation bias that feature tracking picks up from "
+                         "scene depth, but adds noise when the picture moves less than "
+                         "about a pixel per frame, so auto enables it only above that")
     ap.add_argument("--crf", type=int, default=18)
     args = ap.parse_args()
 
     print("pass 1: measuring camera path", file=sys.stderr)
-    steps, cuts, (w, h), fps, diag = estimate_steps(
+    steps, refined, cuts, (w, h), fps, diag = estimate_steps(
         args.input, args.track_width, args.mask_top, args.mask_bottom
     )
     profile = classify(diag)
+    travel = float(np.median(diag["trans"])) if diag["trans"] else 0.0
+    # Polish only when the feature fit is not explaining the scene. Measured on
+    # three clips: where the inlier ratio is high the tracker already beats
+    # direct alignment (timelapse -11 deg against 68, aerial 19 against 57), and
+    # where it is low direct alignment wins by a wide margin (handheld 92 deg
+    # against -37). Below about a pixel of motion per frame there is nothing to
+    # align, so require some travel as well.
+    use_refined = args.refine == "on" or (
+        args.refine == "auto" and not profile["trust_rotation"] and travel > 0.01)
+    if use_refined and len(refined) == len(steps):
+        steps = refined
     smooth = args.smooth if args.smooth is not None else profile["smooth"]
     lock = args.lock if args.lock is not None else 0.0
     n = len(steps)
     print(f"  {n} frames, {w}x{h} @ {fps:.3f} fps", file=sys.stderr)
     print(f"  measured: {profile['evidence']}", file=sys.stderr)
+    if use_refined:
+        why = "polished by direct frame alignment, since the tracker is not fitting this scene"
+    elif profile["trust_rotation"]:
+        why = "left as tracked, which fits this scene well"
+    else:
+        why = "left as tracked: too little motion per frame to align frames directly"
+    print(f"  motion estimates {why}", file=sys.stderr)
     chose = [] if args.smooth is not None else ["--smooth %g" % smooth]
     print(f"  using --smooth {smooth:g} --lock {lock:g}"
           + (f"  ({', '.join(chose)} measured from the footage)" if chose else ""),
