@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10.3.0
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
@@ -19,9 +19,13 @@ jobs:
         run: |
           uv venv
           uv pip install -e .
+          npm ci
 
       - name: stabilize.py must still produce the committed fixture
         run: .venv/bin/python tests/check_fixture.py
 
       - name: The browser port must match stabilize.py
         run: node tests/conformance.mjs
+
+      - name: vendor/ must match the pinned dependency
+        run: node tools/sync-vendor.mjs --check
